@@ -170,6 +170,72 @@ def folder_segments(folder_path: str) -> list[str]:
     return parts
 
 
+# ---------------- Tutorial 分组 ----------------
+# 目标：同一套 tutorial 的讲义、数据、讨论快照全部落进**同一个文件夹**
+# （`Tutorial4/`、`Week4/`，跟随本地既有命名），不再按 Canvas 的
+# `2026/tutorials/T4` / `2024/tutorials` 各摊一处。
+# 编号信号分强弱：模块名里明确写 Tutorial 才算强信号，可以覆盖文件夹分类；
+# week / W 只在已经判定为 tutorial 的分类里参与编号。
+_TUTORIAL_RE = re.compile(r"tutorials?[\s._\-]*0?(\d{1,2})(?![0-9])", re.IGNORECASE)
+_TUTORIAL_T_RE = re.compile(
+    r"(?<![A-Za-z0-9])t[\s._\-]?0?(\d{1,2})(?![0-9])", re.IGNORECASE)
+_WEEK_RE = re.compile(r"\bweeks?[\s._\-]*0?(\d{1,2})(?![0-9])", re.IGNORECASE)
+_WEEK_W_RE = re.compile(
+    r"(?<![A-Za-z0-9])w[\s._\-]?0?(\d{1,2})(?![0-9])", re.IGNORECASE)
+
+
+def strict_tutorial_number(text: str | None) -> int | None:
+    """从模块名/标题里取明确的 tutorial 编号（``Tutorial 4`` / ``T4``）。"""
+    for pattern in (_TUTORIAL_RE, _TUTORIAL_T_RE):
+        match = pattern.search(text or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def week_number(text: str | None) -> int | None:
+    """从 ``Week 4`` / ``week4`` / ``w4`` 里取周次。"""
+    for pattern in (_WEEK_RE, _WEEK_W_RE):
+        match = pattern.search(text or "")
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def tutorial_number(text: str | None) -> int | None:
+    """tutorial / week 两类编号都认（用于已判定为 tutorial 的内容）。"""
+    return strict_tutorial_number(text) or week_number(text)
+
+
+def folder_tutorial_parts(folder_path: str) -> tuple[int | None, tuple[str, ...]]:
+    """画布文件夹里的教程编号及其后的相对子路径。
+
+    ``course files/2026/tutorials/T5/data`` -> ``(5, ("data",))``；
+    没有编号时返回 ``(None, ())``。
+    """
+    segs = folder_segments(folder_path)
+    for index, seg in enumerate(segs):
+        number = tutorial_number(seg)
+        if number is not None:
+            return number, tuple(segs[index + 1:])
+    return None, ()
+
+
+def tutorial_group(folder_path: str, module_name: str, title: str) -> int | None:
+    """把一个条目归到哪一套 tutorial。
+
+    优先级：模块名里的明确 Tutorial 编号（作业描述/模块归属最可信）>
+    画布文件夹里最近的编号（T4 / Week4）> 文件名里的编号。
+    """
+    module_number = strict_tutorial_number(module_name)
+    if module_number is not None:
+        return module_number
+    folder_number, _rest = folder_tutorial_parts(folder_path)
+    if folder_number is not None:
+        return folder_number
+    return tutorial_number(title)
+
+
 def keyword_match(text: str) -> str | None:
     for key, pattern in WORD_RULES:
         if pattern.search(text):
@@ -180,10 +246,16 @@ def keyword_match(text: str) -> str | None:
 def category_of(folder_path: str, title: str, kind: str = "", module_name: str = "") -> str:
     """判定内容属于哪个分类。
 
-    优先级：**文件夹路径（结构信号）> 文件名/模块名 > 类型兜底 > 根目录演示文档**。
-    唯一例外：文件夹只是泛泛的 `Week N` 讲义目录，而文件名明确是作业/项目时，
-    以文件名（更具体）为准。
+    优先级：**明确的 tutorial 归属 > 文件夹路径 > 文件名/模块名 > 类型兜底 >
+    根目录演示文档**。唯一例外：文件夹只是泛泛的 `Week N` 讲义目录，而文件名
+    明确是作业/项目时，以文件名（更具体）为准。
+
+    「明确的 tutorial 归属」指模块名里带编号的 ``Tutorial 4`` / ``T4``：老师常把
+    同一套教程的数据放在 ``Reference`` 或旧年份目录里，但归属仍应按教程算，
+    这样每一套 tutorial 才能收进同一个文件夹。
     """
+    if strict_tutorial_number(module_name) is not None:
+        return "tutorial"
     segs = folder_segments(folder_path)
     folder_key = keyword_match(_norm(" ".join(segs))) if segs else None
     title_key = keyword_match(_norm(f"{module_name} {title}"))
@@ -329,6 +401,34 @@ def _is_category_word(seg: str, key: str) -> bool:
     return any(s == w or s.startswith(w) for w in _CATEGORY_WORDS.get(key, ()))
 
 
+def tutorial_dir(cat_dir: Path, number: int) -> Path:
+    """一套 tutorial 的专属目录；命名跟随本地既有样式。
+
+    `Week1` 的课 -> `Week4`；`Tutorial1` 的课 -> `Tutorial4`；
+    本地还没有任何编号子目录时默认 `Tutorial4`。已存在的同名目录直接复用。
+    """
+    sample = _style_sample(cat_dir, "tutorial")
+    if sample:
+        word, sep = sample
+        return _find_numbered(cat_dir, word, number) or (cat_dir / f"{word}{sep}{number}")
+    return _find_numbered(cat_dir, "Tutorial", number) or (cat_dir / f"Tutorial{number}")
+
+
+def _tutorial_target(cats: CategoryDirs, folder_path: str, module_name: str,
+                     title: str) -> Path | None:
+    """条目属于某套 tutorial 时返回它的目录（保留教程根下的子目录结构）。"""
+    number = tutorial_group(folder_path, module_name, title)
+    if number is None:
+        return None
+    target = tutorial_dir(cats.get("tutorial"), number)
+    folder_number, rest = folder_tutorial_parts(folder_path)
+    if folder_number != number:
+        return target
+    for seg in rest:
+        target = target / sanitize(seg)
+    return target
+
+
 def resolve_dir(cats: CategoryDirs, folder_path: str, module_name: str,
                 title: str, kind: str) -> Path:
     """返回最终目录（可能尚未创建）。
@@ -336,12 +436,18 @@ def resolve_dir(cats: CategoryDirs, folder_path: str, module_name: str,
     优先**镜像 Canvas 文件夹结构**，例如
     `course files/Assignment1/CV_guideline/data` -> `3.Assignments/Assignment_1/CV_guideline/data`；
     讲义分类按章/周归组到 `1.Lecture session/Lecture3/`，识别不到章节号的
-    （`data.zip` 这类散件）保持平铺，见 `lecture_dir`。
+    （`data.zip` 这类散件）保持平铺，见 `lecture_dir`；习题分类按 tutorial
+    归组到 `2.Tutorial session/Tutorial4/`，一套教程的所有文件（含数据、讨论
+    快照）都在同一个文件夹里，见 `tutorial_dir`。
     """
     key = category_of(folder_path, title, kind, module_name)
     cat_dir = cats.get(key)
     if key == "lecture":
         return lecture_dir(cat_dir, folder_path, module_name, title)
+    if key == "tutorial":
+        grouped = _tutorial_target(cats, folder_path, module_name, title)
+        if grouped is not None:
+            return grouped
 
     segs = folder_segments(folder_path)
     if segs and _is_category_word(segs[0], key):
@@ -438,16 +544,26 @@ def build_local_index(course_dir: Path) -> LocalIndex:
     return LocalIndex(course_dir)
 
 
-def plan_item(course_dir: Path, item: Item) -> Path:
+def plan_item(course_dir: Path, item: Item, cats: CategoryDirs | None = None) -> Path:
     """计算某个内容项的落盘路径（不创建目录）。
 
     只有**真实的 Canvas 文件夹**才镜像成子目录；模块名只参与分类与编号推断，
-    否则模块会被误当成一层物理目录。
+    否则模块会被误当成一层物理目录。``cats`` 可由调用方传入以复用一次扫描。
     """
-    cats = CategoryDirs.scan(course_dir)
+    cats = cats or CategoryDirs.scan(course_dir)
     target_dir = resolve_dir(cats, item.folder_path, item.module_name,
                              item.display_name, item.kind)
     return target_dir / sanitize(item.display_name)
+
+
+def tutorial_target(course_dir: Path, item: Item,
+                    cats: CategoryDirs | None = None) -> Path | None:
+    """条目属于某套 tutorial 时返回它的目录（用于决定「移动 vs 复制」）。"""
+    cats = cats or CategoryDirs.scan(course_dir)
+    if category_of(item.folder_path, item.display_name, item.kind,
+                   item.module_name) != "tutorial":
+        return None
+    return _tutorial_target(cats, item.folder_path, item.module_name, item.display_name)
 
 
 def ensure_parent(path: Path) -> None:

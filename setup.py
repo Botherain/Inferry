@@ -8,7 +8,7 @@ Python 3.9 / 3.10 自带的 pip 分别是 20.2 与 21.2，都低于 21.3，edita
 下面直接空调用 ``setup()``，一切以 pyproject.toml 为准，本文件不参与任何决策——
 所以元数据副本只出现在旧环境里，不会变成第二份「需要同步的真相」。
 
-版本号从 ``inferry/__init__.py`` 读，不在第三处再写一遍。
+版本号从 ``inferry/version.py`` 读（全仓库唯一来源），不在第三处再写一遍。
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ HERE = Path(__file__).parent
 
 
 def _version() -> str:
-    text = (HERE / "inferry" / "__init__.py").read_text(encoding="utf-8")
+    text = (HERE / "inferry" / "version.py").read_text(encoding="utf-8")
     m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
     if not m:
-        raise SystemExit("读不到 inferry/__init__.py 里的 __version__")
+        raise SystemExit("读不到 inferry/version.py 里的 __version__")
     return m.group(1)
 
 

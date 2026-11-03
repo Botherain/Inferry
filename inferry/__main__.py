@@ -14,7 +14,7 @@ _SUBMODULES = (
     "auth", "canvas_api", "classify", "cleaner", "coursecode", "deskbox",
     "extract", "extras", "filesync", "gui", "paths", "runner", "scheduler",
     "schoollist", "schoolpicker", "schools", "shortcut", "tidy", "uninstall",
-    "updater",
+    "updater", "verify", "version",
 )
 
 
@@ -110,6 +110,14 @@ def main(argv: list[str] | None = None) -> int:
             for e in res.errors:
                 print("  -", e)
         return 0
+
+    if cmd == "verify":
+        from .runner import check_courses
+
+        checked = check_courses(progress=log.info)
+        print(checked.text())
+        # 退出码 4 表示「抓到了，但有漏抓 / 落点偏移 / 编号冲突」，便于脚本巡检
+        return 0 if checked.ok else 4
 
     if cmd == "login":
         from .auth import CanvasSession
@@ -285,11 +293,12 @@ def main(argv: list[str] | None = None) -> int:
         return uninstall.main(argv[1:])
 
     print("用法: python -m inferry "
-          "[gui|sync|report|flush|clean|tidy|login|courses|schools|update|uninstall|install-browser] "
-          "[--headless] [--version]")
+          "[gui|sync|report|verify|flush|clean|tidy|login|courses|schools|update|uninstall|"
+          "install-browser] [--headless] [--version]")
     print("  gui      启动图形界面（默认）")
     print("  sync     立即同步课程文件与待办")
     print("  report   生成本周学习摘要")
+    print("  verify   只校验抓取完整度与编号（不下载；有问题退出码 4）")
     print("  flush    把后台排队的待办写入 DeskBox")
     print("  clean    一键清理缓存（--dry 预览，--login 连登录态一起清）")
     print("  tidy     整理讲义：先预览移动方案，--apply 才真正执行")

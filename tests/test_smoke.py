@@ -63,6 +63,10 @@ def test_6c_改名后缀不重复下载() -> None:
     _run("[6c] 改名后缀 (1)/(2) 不导致重复下载", smoke.s6c_rename)
 
 
+def test_6d_抓取自检() -> None:
+    _run("[6d] 抓取自检（覆盖度 / 落点 / 编号）", smoke.s6d_verify)
+
+
 def test_7_附加功能(draft_ctx: tuple) -> None:
     c, res = draft_ctx
     _run("[7] 附加功能：GradeNeed / .ics / 每周摘要", smoke.s7_extras, c, res.drafts)
@@ -114,3 +118,7 @@ def test_18_一键卸载() -> None:
 
 def test_19_改名迁移() -> None:
     _run("[19] 改名迁移（CanvasHelper -> Inferry）", smoke.s19_rename)
+
+
+def test_20_启动自动加载() -> None:
+    _run("[20] 启动自动加载（有登录信息才读内容）", smoke.s20_startup)

@@ -1,4 +1,7 @@
 """Inferry - Canvas 课程内容同步与学习辅助工具。"""
 
-__version__ = "2.0.0"
+from .version import __version__
+
 APP_NAME = "Inferry"
+
+__all__ = ["APP_NAME", "__version__"]

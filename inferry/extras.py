@@ -115,8 +115,13 @@ class GradeRow:
         return f"{self.name}: {self.score:g} / {self.possible if self.possible is not None else '?'}"
 
 
-def collect_grades(api: CanvasAPI, courses: list[Course]) -> dict[int, dict]:
-    """返回 {course_id: {"rows": [GradeRow], "current": float|None}}"""
+def collect_grades(api: CanvasAPI, courses: list[Course],
+                   assignments: dict[int, list[dict]] | None = None) -> dict[int, dict]:
+    """返回 {course_id: {"rows": [GradeRow], "current": float|None}}
+
+    ``assignments`` 可传入已取好的作业列表（启动时的只读加载会把同一份数据
+    同时用于成绩和截止时间，避免每门课重复请求）。
+    """
     out: dict[int, dict] = {}
     enrollments = api.scores()
     current_by_course: dict[int, float | None] = {}
@@ -131,12 +136,15 @@ def collect_grades(api: CanvasAPI, courses: list[Course]) -> dict[int, dict]:
 
     for c in courses:
         rows: list[GradeRow] = []
-        try:
-            assignments = api.assignments(c.id)
-        except Exception as exc:
-            log.warning("%s 成绩读取失败: %s", c.short, exc)
-            assignments = []
-        for a in assignments:
+        if assignments is not None:
+            course_assignments = assignments.get(c.id, [])
+        else:
+            try:
+                course_assignments = api.assignments(c.id)
+            except Exception as exc:
+                log.warning("%s 成绩读取失败: %s", c.short, exc)
+                course_assignments = []
+        for a in course_assignments:
             sub = a.get("submission") or {}
             score = sub.get("score")
             if score is None and not sub.get("graded_at"):

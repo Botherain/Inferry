@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inferry"
-# 与 inferry/__init__.py 的 __version__ 保持一致（自检 [9] 会断言）
-version = "2.0.0"
+# 版本号唯一来源是 inferry/version.py：这里不写死，构建时由 setuptools 读取，
+# 避免「源码 / wheel / exe 三处版本各说各话」（自检 [9] 断言这层接线没被改坏）。
+dynamic = ["version"]
 description = "Inferry（原 CanvasHelper）：按既有目录规则归档 Canvas 课程文件，把截止时间写入 DeskBox 待办"
 readme = "README.md"
 license = "MIT"
@@ -68,6 +69,10 @@ Issues = "https://github.com/Botherain/Inferry/issues"
 
 [tool.setuptools]
 packages = ["inferry"]
+
+[tool.setuptools.dynamic]
+# PEP 621 的动态版本：setuptools 直接从版本模块读字面量，不需要导入包。
+version = {attr = "inferry.version.__version__"}
 
 # ---------------------------------------------------------------------------
 # 静态检查（python -m ruff check . ；CI 每次推送都跑）

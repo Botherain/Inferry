@@ -24,12 +24,13 @@ if str(HERE) not in sys.path:
 
 
 # 版本资源：让 exe 的「属性 → 详细信息」里有产品名与版本号，而不是一片空白。
-# 直接从 __init__.py 读，避免第二份要同步的版本号；文件生成在 build/（已 gitignore）。
+# 直接从 inferry/version.py 读（全仓库唯一版本来源），文件生成在 build/（已 gitignore）。
 def _version_info() -> str:
-    src = (HERE / 'inferry' / '__init__.py').read_text(encoding='utf-8')
-    match = re.search(r'__version__\s*=\s*"([^"]+)"', src)
+    src = (HERE / 'inferry' / 'version.py').read_text(encoding='utf-8')
+    match = re.search(r'^__version__\s*=\s*"([^"]+)"', src, re.MULTILINE)
     version = match.group(1) if match else '0.0.0'
-    numbers = [int(x) for x in re.findall(r'\d+', version.split('-')[0])[:4]]
+    # 2.1.0rc1 / 2.1.0+build5 的文件版本只取数字段（2,1,0,0）
+    numbers = [int(x) for x in re.findall(r'\d+', version.split('+')[0])[:3]]
     numbers += [0] * (4 - len(numbers))
     triple = (numbers[0], numbers[1], numbers[2])
     target = HERE / 'build' / 'version_info.txt'

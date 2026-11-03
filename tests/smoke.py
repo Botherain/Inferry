@@ -183,6 +183,8 @@ def s2_classify() -> None:
     for folder, title, kind, want in cases:
         got = category_of(folder, title, kind)
         check(f"{folder or '(根)'}/{title} -> {want}", got == want, f"got={got}")
+    check("模块名明确 Tutorial 4 时覆盖文件夹分类",
+          category_of("course files/Reference", "Bike.zip", "File", "Tutorial 4") == "tutorial")
 
 
 def s3_resolve(folders: dict) -> None:
@@ -209,13 +211,24 @@ def s3_resolve(folders: dict) -> None:
     d5486 = match_folder("CS0002", folders)
     cats2 = CategoryDirs.scan(d5486)
     p = resolve_dir(cats2, "course files/Tutorials", "", "Tutorial 3.pdf", "File")
-    # CS0002 的 tutorial 目录里只有平铺 PDF、没有数字子目录 -> 保持平铺
-    check("CS0002 tutorial 保持平铺", p == cats2.get("tutorial"), str(p))
+    # CS0002 的 tutorial 目录里只有平铺 PDF：现在按 tutorial 编号建独立文件夹
+    check("CS0002 tutorial -> Tutorial3（新增分组目录）",
+          p.name.lower() == "tutorial3" and p.parent == cats2.get("tutorial"), str(p))
+    p = resolve_dir(cats2, "course files/Reference", "Tutorial 4",
+                    "Bike-Sharing-Dataset.zip", "File")
+    check("模块名明确是 Tutorial 4 时优先归到教程目录",
+          p.name.lower() == "tutorial4" and p.parent == cats2.get("tutorial"), str(p))
+    p = resolve_dir(cats2, "course files/Tutorials", "", "SVR-tutorial.pdf", "File")
+    check("没有编号的教程散件保持平铺", p == cats2.get("tutorial"), str(p))
     d5489 = match_folder("CS0003", folders)
     cats3 = CategoryDirs.scan(d5489)
     p = resolve_dir(cats3, "course files/Tutorial", "", "Week5.pdf", "File")
     check("CS0003 tutorial -> Tutorial5",
           p.name.lower().replace(" ", "") == "tutorial5", str(p))
+    p = resolve_dir(cats3, "course files/2026/tutorials/T5/data", "Tutorial 5",
+                    "hour.csv", "File")
+    check("教程内部的 data/ 子目录跟着保留",
+          p.relative_to(d5489).parts[-2:] == ("Tutorial5", "data"), str(p))
     d6382 = match_folder("CS0006", folders)
     cats4 = CategoryDirs.scan(d6382)
     p = resolve_dir(cats4, "course files/Lecture notes", "", "1. Review of Algorithms.pptx", "File")
@@ -607,9 +620,10 @@ def s6_plan() -> None:
 
 
 def s6b_local() -> None:
-    from inferry.filesync import build_plan
+    from inferry import filesync
+    from inferry.filesync import build_plan, execute_plan
 
-    print("\n[6b] 本地已有内容的识别（不重复下载 / 纯数字名不误判）")
+    print("\n[6b] 本地已有内容的识别（不重复下载 / 不丢画布结构）")
     tmp2 = Path(tempfile.mkdtemp(prefix="ch_anchor_"))
     (tmp2 / "6.Others").mkdir()
     (tmp2 / "6.Others" / "0.Introduction.pptx").write_bytes(b"z" * 777)
@@ -619,22 +633,129 @@ def s6b_local() -> None:
         Item(course_id=9, module_name="", title="1.npy", kind="File",
              file_id=112, file_name="1.npy", file_url="http://x/6", file_size=111),
     ]
-    plan3 = build_plan(Course(id=9, name="Demo", code="CS9999"), tmp2, items2, {"files": {}})
+    course = Course(id=9, name="Demo", code="CS9999")
+    plan3 = build_plan(course, tmp2, items2, {"files": {}})
     got = {p.item.title: (p.action, p.note, str(p.target)) for p in plan3.files}
     print("      计划:", got)
-    check("同内容换名 -> 已存在",
-          got["Introduction.pptx"][0] == "exists"
-          and got["Introduction.pptx"][1] == "本地已有同内容文件", str(got))
+    check("同内容在别的分类 -> 复制到画布位置",
+          got["Introduction.pptx"][0] == "copy"
+          and got["Introduction.pptx"][2]
+          == str(tmp2 / "1.Lecture session" / "Introduction.pptx")
+          and got["Introduction.pptx"][1].startswith("本地复制"), str(got))
     check("纯数字名不被误判为已存在",
           got["1.npy"][0] == "download", str(got))
-    (tmp2 / "1.Lecture session").mkdir()
-    (tmp2 / "1.Lecture session" / "Introduction.pptx").write_bytes(b"z" * 777)
-    plan4 = build_plan(Course(id=9, name="Demo", code="CS9999"), tmp2, items2[:1],
-                       {"files": {}})
-    check("同路径优先报本地已存在",
-          plan4.files[0].action == "exists" and plan4.files[0].note == "本地已存在",
-          plan4.files[0].note)
+
+    class _NoNet:
+        """复制动作不该联网；一旦调用下载就直接失败。"""
+
+        def download(self, url: str):
+            raise AssertionError(f"不应下载 {url}")
+
+    # execute_plan 收尾会 flush state -> 不能碰真实 state.json
+    old_flush = filesync._flush_state
+    filesync._flush_state = lambda state: None
+    try:
+        st: dict = {"files": {}}
+        plan4 = build_plan(course, tmp2, items2[:1], st)
+        stats = execute_plan([plan4], _NoNet(), st)  # type: ignore[arg-type]
+        copied = tmp2 / "1.Lecture session" / "Introduction.pptx"
+        check("复制动作不联网且内容一致",
+              stats.get("copied") == 1 and copied.read_bytes() == b"z" * 777,
+              f"{stats} {copied.exists()}")
+        again = build_plan(course, tmp2, items2[:1], st)
+        pf = again.files[0]
+        check("复制后二次计划为已存在",
+              pf.action == "exists" and pf.target == copied,
+              f"{pf.action} {pf.target}")
+    finally:
+        filesync._flush_state = old_flush
     shutil.rmtree(tmp2, ignore_errors=True)
+
+
+def s6d_verify() -> None:
+    """[6d] 抓取自检：覆盖度 / 落点 / 编号冲突 / 同步后缺失。"""
+    from inferry import verify
+    from inferry.filesync import CoursePlan, PlannedFile, build_plan
+
+    print("\n[6d] 抓取自检（覆盖度 / 落点 / 编号）")
+    check("自检：纯数字文件名不算单元编号",
+          verify.unit_number("0.jpg") is None and verify.unit_number("98.npy") is None
+          and verify.unit_number("2026") is None,
+          f"{verify.unit_number('0.jpg')} / {verify.unit_number('98.npy')}")
+    check("自检：编号 + 正文仍能识别",
+          verify.unit_number("Tutorial4.ipynb") == 4
+          and verify.unit_number("3.2 Gradient descent") == 3,
+          f"{verify.unit_number('Tutorial4.ipynb')} / {verify.unit_number('3.2 Gradient descent')}")
+    tmp = Path(tempfile.mkdtemp(prefix="ch_verify_"))
+    course = Course(id=7, name="ML", code="CS5489")
+    items = [
+        Item(course_id=7, module_name="Tutorial 4", title="Tutorial4.ipynb", kind="File",
+             file_id=401, file_name="Tutorial4.ipynb", file_url="http://x/4", file_size=10,
+             folder_path="course files/2026/tutorials/T4"),
+        Item(course_id=7, module_name="Tutorial 5", title="Tutorial5.ipynb", kind="File",
+             file_id=501, file_name="Tutorial5.ipynb", file_url="http://x/5", file_size=10,
+             folder_path="course files/2026/tutorials/T5"),
+        Item(course_id=7, module_name="Tutorial 6", title="Typo.pdf", kind="File",
+             file_id=None, file_url=None, file_size=1,
+             folder_path="course files/2026/tutorials/T6"),
+    ]
+    # 本地：旧布局把 Tutorial4 放在 2026/tutorials/T4；新策略收进 Tutorial4/（复制，不搬原件）
+    old = tmp / "2.Tutorial session" / "2026" / "tutorials" / "T4"
+    old.mkdir(parents=True)
+    (old / "Tutorial4.ipynb").write_bytes(b"x" * 10)
+    plan = build_plan(course, tmp, items, {"files": {}})
+    rep = verify.check(plan, items)
+    print("      报告:", rep.text().replace("\n", " | "))
+    msgs = "\n".join(f.message for f in rep.findings)
+    check("自检：教程文件从旧布局补进 Tutorial4",
+          any(p.action == "copy" and p.target.parent.name == "Tutorial4"
+              for p in plan.files),
+          str([(p.target.name, p.action) for p in plan.files]))
+    check("自检：报出没有下载地址的条目", "未抓取" in msgs and "Typo.pdf" in msgs, msgs)
+    check("自检：报出画布有编号但计划缺号", "编号 6" in msgs, msgs)
+    check("自检：正常条目不被误报（无编号 / 落点告警）",
+          not any(f.kind in ("numbering", "path") for f in rep.findings), msgs)
+
+    # 复制执行：旧位置保留、目标就位、state 跟着记到新路径
+    from inferry import filesync
+    from inferry.filesync import execute_plan
+
+    class _NoNet:
+        def download(self, url: str):
+            raise AssertionError(f"复制不该下载 {url}")
+
+    old_flush = filesync._flush_state
+    filesync._flush_state = lambda state: None
+    try:
+        st: dict = {"files": {}}
+        single = build_plan(course, tmp, [items[0]], st)
+        stats = execute_plan([single], _NoNet(), st)  # type: ignore[arg-type]
+        copied = tmp / "2.Tutorial session" / "Tutorial4" / "Tutorial4.ipynb"
+        check("复制执行后原位置保留、目标就位",
+              stats.get("copied") == 1 and copied.is_file()
+              and (old / "Tutorial4.ipynb").is_file(), str(stats))
+        check("state 记录指向教程目录",
+              st["files"]["file:7:401"]["path"] == str(copied), str(st["files"]))
+    finally:
+        filesync._flush_state = old_flush
+
+    bad = [Item(course_id=7, module_name="Tutorial 4", title="Tutorial5.ipynb", kind="File",
+                file_id=402, file_name="Tutorial5.ipynb", file_url="http://x/9", file_size=10,
+                folder_path="course files/2026/tutorials/T4")]
+    rep2 = verify.check(build_plan(course, tmp, bad, {"files": {}}), bad)
+    check("自检：模块 / 文件夹 / 文件名编号互相打架",
+          any(f.kind == "numbering" for f in rep2.findings),
+          str([f.message for f in rep2.findings]))
+
+    fake_plan = CoursePlan(course=course, folder=tmp)
+    fake_plan.files.append(PlannedFile(
+        item=items[1], target=tmp / "2.Tutorial session" / "2026" / "tutorials" / "T5"
+        / "Tutorial5.ipynb", action="download", size=10))
+    post = verify.check_local(fake_plan, "CS5489：")
+    check("自检：同步后仍不存在算错误",
+          any(f.kind == "missing" and f.level == "error" for f in post),
+          str([f.message for f in post]))
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 def s6c_rename() -> None:
@@ -831,15 +952,22 @@ def s8_auth() -> None:
 
 def s9_packaging() -> None:
     from inferry import __version__ as _ver
+    from inferry.version import CURRENT, VERSION_TAG
 
     print("\n[9] 打包元数据 pyproject.toml")
     pt_path = ROOT / "pyproject.toml"
     check("pyproject.toml 存在", pt_path.is_file(), str(pt_path))
     pt = pt_path.read_text(encoding="utf-8") if pt_path.is_file() else ""
-    ver_line = next((ln.strip() for ln in pt.splitlines()
-                     if ln.strip().startswith("version =")), "")
-    got_ver = ver_line.split('"')[1] if '"' in ver_line else ""
-    check("版本号与 __version__ 一致", got_ver == _ver, f"{got_ver!r} vs {_ver!r}")
+    # 版本号唯一来源：pyproject 不再写死，构建时由 setuptools 从版本模块读取。
+    check("pyproject 用动态版本（唯一来源 inferry/version.py）",
+          'dynamic = ["version"]' in pt
+          and 'version = {attr = "inferry.version.__version__"}' in pt, pt[:200])
+    check("pyproject 没有第二份硬编码版本号",
+          re.search(r'^version\s*=\s*"', pt, re.MULTILINE) is None,
+          str(re.findall(r'^version\s*=\s*"', pt, re.MULTILINE)))
+    check("版本号是规范写法且 tag 为 v + 版本",
+          CURRENT.pep440 == _ver and f"v{_ver}" == VERSION_TAG,
+          f"{CURRENT.pep440} / {VERSION_TAG}")
     check("声明 requires-python >=3.9", 'requires-python = ">=3.9"' in pt)
     # mypy 从 1.19 起不再支持把 3.9 当目标，只能按 3.10 检查；ruff 仍按 3.9 判。
     check("静态检查目标不高于声明地板",
@@ -908,12 +1036,23 @@ def s9_packaging() -> None:
           len(gui_scripts) == 2 and "inferry-gui" in gui_scripts[1].split("\n[", 1)[0])
     check("打包 spec 带 exe 版本资源（文件属性里能看到版本号）",
           "version=VERSION_INFO" in spec_txt and "VSVersionInfo(" in spec_txt)
+    check("打包 spec 从 inferry/version.py 读版本（不写死）",
+          "'inferry'" in spec_txt and "'version.py'" in spec_txt,
+          spec_txt[:120])
     release_yml = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     check("zip 里带 README.txt 并校验包内容",
           "dist/README.txt" in release_yml
           and 'Inferry/Inferry.exe"} - names' in release_yml)
     check("Release 正文自动追加「下载哪个文件」指引",
           "下载哪个文件" in release_yml and "Inferry-v{ver}-win64.zip" in release_yml)
+    check("发布工作流用 check_version.py 校验 tag 与版本",
+          "scripts/check_version.py --tag" in release_yml
+          and "steps.ver.outputs.prerelease" in release_yml)
+    ci_yml = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    check("CI 跑版本号架构检查", "scripts/check_version.py" in ci_yml)
+    check("inferry/__init__ 从 version.py 取版本",
+          "from .version import __version__"
+          in (ROOT / "inferry" / "__init__.py").read_text(encoding="utf-8"))
 
     # ---- 一键卸载：脚本入库、编码正确、打包带上 ----
     for name in ("uninstall.bat", "uninstall.ps1"):
@@ -1155,10 +1294,10 @@ def s12_discussions() -> None:
     plan = build_plan(c, course, items, st)
     names = [str(p.target.relative_to(course)).replace("\\", "/") for p in plan.files]
     print("      计划:", names)
-    check("笔记本按帖标题分类进 2.Tutorial session",
-          "2.Tutorial session/cs5494_tutorial_1_MNIST.ipynb" in names, str(names))
-    check("帖子存快照为 html",
-          "2.Tutorial session/Week 1 Tutorial.html" in names, str(names))
+    check("笔记本按帖标题收进 Tutorial1",
+          "2.Tutorial session/Tutorial1/cs5494_tutorial_1_MNIST.ipynb" in names, str(names))
+    check("帖子快照也进同一套 tutorial",
+          "2.Tutorial session/Tutorial1/Week 1 Tutorial.html" in names, str(names))
     check("预览标注讨论区来源",
           any(p.note == "讨论区链接" for p in plan.files)
           and any(p.note == "讨论帖快照" for p in plan.files),
@@ -1183,11 +1322,12 @@ def s12_discussions() -> None:
         check("执行：下载 1 + 快照 1",
               stats["downloaded"] == 1 and stats["pages"] == 1, str(stats))
         check("落盘内容正确",
-              (course / "2.Tutorial session" / "cs5494_tutorial_1_MNIST.ipynb")
+              (course / "2.Tutorial session" / "Tutorial1" / "cs5494_tutorial_1_MNIST.ipynb")
               .read_bytes().startswith(b"{")
-              and (course / "2.Tutorial session" / "Week 1 Tutorial.html").is_file())
+              and (course / "2.Tutorial session" / "Tutorial1"
+                   / "Week 1 Tutorial.html").is_file())
         check("快照正文不能丢（Discussion 走 extra.message）",
-              "colab link above" in (course / "2.Tutorial session"
+              "colab link above" in (course / "2.Tutorial session" / "Tutorial1"
                                      / "Week 1 Tutorial.html").read_text(encoding="utf-8"))
         plan2 = build_plan(c, course, items, st)
         check("二次同步全部已存在",
@@ -1464,6 +1604,18 @@ def s16_update() -> None:
     check("看不懂的版本号不误报",
           updater.parse_version("abc") is None
           and not updater.is_newer("latest", "1.3.0"))
+    # 预发布通道：PEP 440 排序（旧实现把所有预发布压成同一个键，rc2 与 rc1 分不出）
+    check("预发布按序号比较（rc2 > rc1）", updater.is_newer("1.4.0rc2", "1.4.0rc1"))
+    check("正式版高于 rc", updater.is_newer("1.4.0", "1.4.0rc2"))
+    check("rc 高于 beta", updater.is_newer("1.4.0rc2", "1.4.0b9"))
+    check("beta 高于 alpha", updater.is_newer("1.4.0b1", "1.4.0a9"))
+    check("alpha 高于 dev", updater.is_newer("1.4.0a1", "1.4.0.dev3"))
+    check("SemVer 写法并入同一套排序",
+          updater.is_newer("1.4.0-rc.2", "1.4.0-rc.1"))
+    cached_rc = updater._release_from_dict({"tag": "v1.5.0rc1", "version": "1.5.0rc1"})
+    check("缓存里的预发布按版本号识别（不只看 GitHub 勾选）",
+          cached_rc is not None and cached_rc.prerelease
+          and cached_rc.version == "1.5.0rc1", repr(cached_rc))
 
     tmp = Path(tempfile.mkdtemp(prefix="ch_update_"))
     old_cache, old_updates = updater.UPDATE_CACHE_PATH, updater.UPDATES_DIR
@@ -2021,6 +2173,68 @@ def s19_rename() -> None:
           "1.3.4" in readme and "CanvasHelper" in readme and "回滚" in readme)
 
 
+def s20_startup() -> None:
+    """[20] 启动自动加载：有登录信息才读内容，课程优先。"""
+    from inferry import runner
+    from inferry.canvas_api import Course
+    from inferry.extras import collect_grades
+
+    print("\n[20] 启动自动加载（有登录信息才读内容）")
+    gui_src = (ROOT / "inferry" / "gui.py").read_text(encoding="utf-8")
+    check("启动不再先读公告",
+          "if not auth:\n            self.do_load_notices()" not in gui_src)
+    check("没有登录文件时只提示、不发起加载",
+          "if not SESSION_PATH.exists():" in gui_src
+          and "未登录（点击" in gui_src)
+    check("自动检查只用无窗口会话，不弹登录窗",
+          "if auto:" in gui_src and "s.start(headless=True)" in gui_src
+          and "if not s.is_logged_in()" in gui_src)
+    check("课程加载后自动补公告 / 成绩 / 截止时间",
+          "self._load_extras_async()" in gui_src
+          and "runner.load_dashboard_extras(" in gui_src)
+
+    # 选课回退：还没勾选时，默认选本地已有文件夹的课程
+    tmp = Path(tempfile.mkdtemp(prefix="ch_startup_"))
+    (tmp / "CS1111 - Demo").mkdir()
+    courses = [Course(id=1, name="Demo", code="CS1111"),
+               Course(id=2, name="Other", code="CS2222")]
+    cfg = {"classes_root": str(tmp), "selected_courses": []}
+    picked = runner._dashboard_selection(cfg, courses)
+    check("未勾选时默认选本地已有文件夹的课程",
+          [c.id for c in picked] == [1], str([c.id for c in picked]))
+    cfg["selected_courses"] = [2]
+    check("已勾选时以勾选为准",
+          [c.id for c in runner._dashboard_selection(cfg, courses)] == [2])
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    # assignments -> Item：标题解码 + 截止时间
+    raw = {"id": 9, "name": "Tutorial+1", "due_at": "2026-11-20T15:59:00Z",
+           "points_possible": 10, "html_url": "https://x/9"}
+    items = runner._assignment_items(courses[0], [raw])
+    check("作业转待办条目（+ 解码、截止时间）",
+          len(items) == 1 and items[0].title == "Tutorial 1"
+          and items[0].due_at == "2026-11-20T15:59:00Z", str(items))
+
+    # 预载 assignments 时成绩不再逐课请求
+    class _Api:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def scores(self):
+            return [{"course": {"id": 1}, "grades": {"current_score": 0.8}}]
+
+        def assignments(self, _cid: int):
+            self.calls += 1
+            return []
+
+    api = _Api()
+    grades = collect_grades(api, [courses[0]], {1: [
+        {"name": "A1", "points_possible": 10,
+         "submission": {"score": 8, "graded_at": "2026-11-01T00:00:00Z"}}]})
+    check("成绩复用预载作业列表（不重复请求）",
+          api.calls == 0 and grades[1]["rows"][0].score == 8.0, str(api.calls))
+
+
 def main() -> int:
     cfg = load_config()
     root, fixture_root = build_course_root()
@@ -2038,6 +2252,7 @@ def main() -> int:
     s6_plan()
     s6b_local()
     s6c_rename()
+    s6d_verify()
     s7_extras(c, res.drafts)
     s8_auth()
     s9_packaging()
@@ -2051,6 +2266,7 @@ def main() -> int:
     s17_install_ux()
     s18_uninstall()
     s19_rename()
+    s20_startup()
 
     if fixture_root is not None:
         shutil.rmtree(fixture_root, ignore_errors=True)

@@ -49,6 +49,10 @@ from .paths import (
     now_local,
     to_local,
 )
+from .version import Version
+from .version import is_newer as _version_is_newer
+from .version import parse as _parse_version
+from .version import parse_tag as _parse_tag
 
 log = get_logger()
 
@@ -74,11 +78,7 @@ _INTERNAL_DIR = "_internal"
 
 _USER_AGENT = f"Inferry/{__version__} (+https://github.com/{REPO})"
 
-#: 版本号：可选 v 前缀 + 数字段 + 可选后缀（rc1 / beta.2 / +local）
-_VER_RE = re.compile(r"^[vV]?(\d+(?:\.\d+)*)(?:[-_.+]?(.+))?$")
-#: 预发布标记：rc / alpha / beta / dev / pre，以及 PEP 440 的 a1、b2。
-#: 单字母必须跟数字，否则「+build5」这种构建元数据会被误判成预发布。
-_PRE_RE = re.compile(r"^(?:(?:rc|alpha|beta|dev|pre|preview)\d*|[ab]\d+)", re.IGNORECASE)
+#: 版本号解析统一走 :mod:`inferry.version`（PEP 440 排序 + v 前缀 + SemVer 写法）。
 #: 公告正文里要去掉的 markdown 记号
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -92,28 +92,19 @@ _CODE_RE = re.compile(r"`([^`]*)`")
 # --------------------------------------------------------------------------- #
 
 def parse_version(text: str) -> tuple[int, ...] | None:
-    """把 ``v1.4.0`` / ``1.4`` / ``1.4.0-rc1`` 变成可比较的元组；看不懂返回 None。
+    """把 ``v1.4`` / ``1.4.0`` / ``1.4.0-rc1`` 变成可比较的键；看不懂返回 ``None``。
 
-    统一补到三段数字，最后一位表示「正式版 1 / 预发布 0」，于是
-    ``1.4.0-rc1 < 1.4.0`` 成立，而不必写半天的特判。
+    真正的解析与排序规则在 :mod:`inferry.version`：``dev < aN < bN < rcN < 正式版``，
+    同一通道内按序号比较（``rc1 < rc2``），构建元数据不参与比较。这里保留元组
+    返回值，是因为缓存排序与旧调用方都按「可直接比较的键」使用。
     """
-    match = _VER_RE.match((text or "").strip())
-    if not match:
-        return None
-    nums = [int(x) for x in match.group(1).split(".")]
-    while len(nums) < 3:
-        nums.append(0)
-    suffix = (match.group(2) or "").strip()
-    prerelease = bool(suffix) and bool(_PRE_RE.match(suffix))
-    return (*nums, 0 if prerelease else 1)
+    version = _parse_version(text)
+    return version.sort_key() if version is not None else None
 
 
 def is_newer(remote: str, local: str) -> bool:
     """``remote`` 是否比 ``local`` 新。任何一边解析失败都算「不是」（不误报更新）。"""
-    left, right = parse_version(remote), parse_version(local)
-    if left is None or right is None:
-        return False
-    return left > right
+    return _version_is_newer(remote, local)
 
 
 # --------------------------------------------------------------------------- #
@@ -238,25 +229,28 @@ def fetch_releases(
     for raw in data:
         if not isinstance(raw, dict) or raw.get("draft"):
             continue
-        if raw.get("prerelease") and not include_prerelease:
-            continue
         tag = str(raw.get("tag_name") or "").strip()
-        version = tag.lstrip("vV")
-        if parse_version(version) is None:
+        parsed = _parse_tag(tag)
+        if parsed is None:
+            continue
+        # 预发布以版本号本身为准（rc/beta/alpha/dev），不只依赖 GitHub 的勾选项：
+        # 手滑忘了勾 prerelease 时，稳定版用户也不该收到 rc。
+        if (raw.get("prerelease") or parsed.is_prerelease) and not include_prerelease:
             continue
         assets = [a for a in (_asset_from(x) for x in raw.get("assets") or []
                               if isinstance(x, dict)) if a is not None]
         out.append(Release(
             tag=tag,
-            version=version,
+            version=parsed.pep440,
             title=str(raw.get("name") or tag),
             notes=str(raw.get("body") or ""),
             url=str(raw.get("html_url") or RELEASES_PAGE),
             published_at=str(raw.get("published_at") or ""),
-            prerelease=bool(raw.get("prerelease")),
+            prerelease=bool(raw.get("prerelease")) or parsed.is_prerelease,
             assets=assets,
         ))
-    out.sort(key=lambda r: parse_version(r.version) or (0,), reverse=True)
+    out.sort(key=lambda r: (_parse_version(r.version) or Version(0, 0, 0)).sort_key(),
+             reverse=True)
     return out
 
 
@@ -297,9 +291,10 @@ def _release_to_dict(release: Release) -> dict:
 
 def _release_from_dict(raw: dict) -> Release | None:
     tag = str(raw.get("tag") or "")
-    version = str(raw.get("version") or tag.lstrip("vV"))
-    if parse_version(version) is None:
+    parsed = _parse_tag(tag or str(raw.get("version") or ""))
+    if parsed is None:
         return None
+    version = parsed.pep440
     assets: list[Asset] = []
     for a in raw.get("assets") or []:
         if not isinstance(a, dict):
@@ -320,7 +315,7 @@ def _release_from_dict(raw: dict) -> Release | None:
         notes=str(raw.get("notes") or ""),
         url=str(raw.get("url") or RELEASES_PAGE),
         published_at=str(raw.get("published_at") or ""),
-        prerelease=bool(raw.get("prerelease")),
+        prerelease=bool(raw.get("prerelease")) or parsed.is_prerelease,
         assets=assets,
     )
 
@@ -477,7 +472,8 @@ def cached_status(local: str | None = None) -> UpdateStatus | None:
                 if r is not None]
     if not releases:
         return None
-    releases.sort(key=lambda r: parse_version(r.version) or (0,), reverse=True)
+    releases.sort(key=lambda r: (_parse_version(r.version) or Version(0, 0, 0)).sort_key(),
+                  reverse=True)
     current = local or __version__
     newer = [r for r in releases if is_newer(r.version, current)]
     return UpdateStatus(

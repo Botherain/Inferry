@@ -67,8 +67,8 @@ _NOISE_NAME_WORDS = ("demo", "dev", "sandbox", "staging", "qa", "test")
 #: 官方源里名字形如 "09633076 instructure" —— 纯编号租户
 _NUMERIC_NAME_RE = re.compile(r"^\d+\s")
 
-#: 官方接口返回的租户按名称排序，名字前常带空格
-_NAME_TRIM = " \t\r\n　"
+#: 官方接口返回的租户按名称排序，名字前常带空格（含全角空格 \u3000）
+_NAME_TRIM = " \t\r\n\u3000"
 
 
 def _clean_name(raw: str) -> str:

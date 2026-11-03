@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import deskbox, extras
+from . import deskbox, extras, verify
 from .auth import AuthRequired, CanvasSession
-from .canvas_api import CanvasAPI, Course, Item
+from .canvas_api import CanvasAPI, Course, Item, decode_name
 from .classify import course_dirs, match_folder
 from .filesync import CoursePlan, build_plan, describe, execute_plan
 from .paths import (
@@ -53,6 +53,8 @@ class SyncResult:
     errors: list[str] = field(default_factory=list)
     # 登录态失效导致本轮未执行（区别于普通的 errors）
     auth_required: bool = False
+    # 抓取自检：覆盖度 / 落点 / 编号（见 verify.py）。dry-run 时也能看
+    verify: verify.Report = field(default_factory=verify.Report)
     text: str = ""
 
 
@@ -235,6 +237,13 @@ def run_sync(
             plans.append(build_plan(c, folder, items_by_course[c.id], state))
         res.plans = plans
         res.text = describe(plans)
+        # 抓取自检：同名文件落到别处 / 编号断档 / 模块与文件名打架都会在这里列出
+        res.verify = verify.merge([
+            verify.check(p, items_by_course.get(p.course.id, [])) for p in plans
+        ])
+        res.text += "\n\n【抓取校验】\n" + res.verify.text()
+        for finding in res.verify.problems:
+            log.warning(finding.message)
 
         # 待办草稿在预览阶段就算出来，便于界面上直接看到截止时间
         drafts = deskbox.build_drafts(
@@ -273,6 +282,18 @@ def run_sync(
 
         progress("开始下载与归档…")
         res.stats = execute_plan(plans, api, state, progress=progress)
+
+        # 同步后核对磁盘：该写的都写了没有、大小对不对
+        post = verify.merge([
+            verify.Report(checked=len(p.files),
+                          findings=verify.check_local(p, f"{p.course.short}："))
+            for p in plans
+        ])
+        if post.problems:
+            res.text += "\n\n【同步结果校验】\n" + post.text()
+            for finding in post.problems:
+                log.warning(finding.message)
+            res.verify = verify.merge([res.verify, post])
 
         # ---------- 待办 ----------
         # 未配置 todo_path 时（新机器自动发现失败）直接跳过待办相关逻辑
@@ -345,6 +366,186 @@ def run_sync(
 
 
 # ---------------- 轻量采集（不下载文件） ----------------
+
+def check_courses(
+    cfg: dict | None = None,
+    course_ids: list[int] | None = None,
+    session: CanvasSession | None = None,
+    progress: Progress = _nop,
+) -> verify.Report:
+    """只采集 + 生成计划 + 自检，不下载、不改课程目录（``inferry verify`` 的实现）。
+
+    与 ``run_sync(dry_run=True)`` 的区别：不建待办草稿、不碰 DeskBox、不生成
+    日历，只回答「画布上的东西是否都计划到了、落点对不对、编号连不连续」。
+    """
+    cfg = cfg or load_config()
+    if course_ids:
+        cfg = dict(cfg)
+        cfg["selected_courses"] = course_ids
+    own_session = session is None
+    session = session or CanvasSession()
+    try:
+        if not session.ensure_login(on_status=progress):
+            return verify.Report(findings=[verify.Finding(
+                "error", "auth", "登录失败或超时，未能完成校验")])
+        api = CanvasAPI(session)
+        courses, folders = resolve_courses(cfg, api)
+        state = load_state()
+        reports: list[verify.Report] = []
+        for course in courses:
+            progress(f"读取课程结构：{course.short}")
+            try:
+                items, _ = api.collect_items(course.id)
+            except AuthRequired:
+                raise
+            except Exception as exc:
+                log.warning("读取 %s 失败: %s", course.short, exc)
+                continue
+            folder = folders.get(course.id) or (Path(cfg["classes_root"]) / course.short)
+            plan = build_plan(course, folder, items, state)
+            reports.append(verify.check(plan, items))
+        return verify.merge(reports)
+    finally:
+        if own_session:
+            session.close()
+
+
+@dataclass
+class DashboardExtras:
+    """启动时只读加载的界面内容（公告 / 成绩 / 截止时间）。"""
+
+    notices: list = field(default_factory=list)
+    unread: list = field(default_factory=list)
+    grades: dict = field(default_factory=dict)
+    drafts: list = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def _dashboard_selection(cfg: dict, courses: list[Course]) -> list[Course]:
+    """勾选的课程；还没保存过勾选时，退回「本地已有文件夹」的默认选择。"""
+    ids = {int(x) for x in (cfg.get("selected_courses") or [])}
+    if ids:
+        return [c for c in courses if c.id in ids]
+    folders = course_dirs(Path(cfg["classes_root"]))
+    return [c for c in courses if match_folder(c.short, folders)]
+
+
+def _assignment_due(raw: dict) -> str | None:
+    due = raw.get("due_at")
+    if due:
+        return str(due)
+    for entry in raw.get("all_dates") or []:
+        if isinstance(entry, dict) and entry.get("due_at"):
+            return str(entry["due_at"])
+    return None
+
+
+def _assignment_items(course: Course, assignments: list[dict]) -> list[Item]:
+    """把 assignments 接口的结果变成待办草稿需要的 Item（不拉模块/文件）。"""
+    items: list[Item] = []
+    for raw in assignments:
+        due = _assignment_due(raw)
+        if not due:
+            continue
+        items.append(Item(
+            course_id=course.id,
+            module_name="",
+            title=decode_name(str(raw.get("name") or f"作业 {raw.get('id')}")),
+            kind="Assignment",
+            html_url=str(raw.get("html_url") or ""),
+            due_at=due,
+            points=raw.get("points_possible"),
+            extra=raw,
+        ))
+    return items
+
+
+def load_dashboard_extras(
+    cfg: dict | None = None,
+    courses: list[Course] | None = None,
+    session: CanvasSession | None = None,
+    progress: Progress = _nop,
+) -> DashboardExtras | None:
+    """用已保存的登录态读取公告 / 成绩 / 截止时间（不下载、不改课程目录）。
+
+    返回 ``None`` 表示没有有效会话：调用方只提示登录，不展示旧内容。
+    与 ``ensure_login`` 的区别是**绝不弹浏览器**——启动时没人点过登录按钮，
+    不能因为 cookie 过期就把浏览窗口甩到用户脸上。
+    """
+    cfg = cfg or load_config()
+    own_session = session is None
+    session = session or CanvasSession()
+    bundle = DashboardExtras()
+    try:
+        if own_session:
+            session.start(headless=True)
+            if not session.is_logged_in():
+                return None
+        api = CanvasAPI(session)
+        if courses is None:
+            courses = api.courses()
+        selected = _dashboard_selection(cfg, courses)
+        if not selected:
+            return bundle
+
+        # 作业列表同时喂给成绩与截止时间，避免每门课请求两遍
+        assignments: dict[int, list[dict]] = {}
+        for course in selected:
+            try:
+                assignments[course.id] = api.assignments(course.id)
+            except AuthRequired:
+                raise
+            except Exception as exc:
+                bundle.errors.append(f"{course.short} 作业读取失败：{exc}")
+                assignments[course.id] = []
+
+        extras_cfg = cfg.get("extras") or {}
+        if extras_cfg.get("grades", True):
+            try:
+                progress("读取成绩…")
+                bundle.grades = extras.collect_grades(api, selected, assignments)
+            except AuthRequired:
+                raise
+            except Exception as exc:
+                bundle.errors.append(f"成绩读取失败：{exc}")
+
+        if extras_cfg.get("notices", True):
+            try:
+                progress("读取公告…")
+                bundle.notices = extras.collect_notices(api, selected, progress)
+                bundle.unread = extras.mark_notices_read(bundle.notices)
+            except AuthRequired:
+                raise
+            except Exception as exc:
+                bundle.errors.append(f"通知读取失败：{exc}")
+
+        try:
+            progress("读取截止时间…")
+            items_by_course = {c.id: _assignment_items(c, assignments[c.id]) for c in selected}
+            result = deskbox.build_drafts(
+                {c.id: c for c in selected}, items_by_course, cfg=cfg)
+            bundle.drafts = result.drafts
+            desk_cfg = cfg.get("deskbox") or {}
+            if desk_cfg.get("enabled", True) and desk_cfg.get("todo_path"):
+                try:
+                    statuses = deskbox.preview_status(
+                        Path(desk_cfg["todo_path"]), bundle.drafts)
+                    for draft in bundle.drafts:
+                        status = statuses.get(draft.key)
+                        if status:
+                            draft.status = status
+                            draft.existing = True
+                except Exception as exc:
+                    log.debug("待办状态预判失败: %s", exc)
+        except Exception as exc:
+            bundle.errors.append(f"截止时间整理失败：{exc}")
+        return bundle
+    except AuthRequired:
+        return None
+    finally:
+        if own_session:
+            session.close()
+
 
 def collect_deadlines(cfg: dict | None = None, progress: Progress = _nop) -> list:
     """只读取作业/测验截止时间，生成待办草稿。"""

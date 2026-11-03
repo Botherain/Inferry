@@ -19,6 +19,7 @@ from .paths import (
     DATA_DIR,
     LOG_PATH,
     PROFILE_DIR,
+    SESSION_PATH,
     canvas_home,
     get_logger,
     load_config,
@@ -89,8 +90,8 @@ class App(tk.Tk):
         # 旧计划任务指向已不存在的 exe，旧桌面快捷方式是死链。都在后台小成本完成，
         # 失败只记日志，绝不影响启动。
         self._cleanup_renamed_leftovers()
-        # 院校清单在线更新：后台静默拉取，不阻塞界面（缓存过期才拉）
-        self._refresh_school_list_async()
+        # 院校清单在线更新：等启动的内容加载完再跑，避免抢同一个后台槽位
+        self.after(12000, lambda: self._when_idle(self._refresh_school_list_async))
         # 版本校验：错开一点启动，让首屏先画出来；节流由 updater 自己控制
         self.after(800, self._announce_upgrade_once)
         self.after(1500, self._check_update_async)
@@ -105,14 +106,6 @@ class App(tk.Tk):
             self.login_var.set(f"登录状态：⚠ 已过期（{when}），点击重新登录")
             self.log("上次后台同步时 Canvas 登录已过期，"
                      "点上方「登录状态」或「登录 / 刷新课程」重新登录")
-        pending = deskbox.pending_drafts()
-        if pending:
-            self.log(f"检测到 {len(pending)} 条后台排队待办，准备写入 DeskBox…")
-
-            def job():
-                return runner.flush_pending(self.cfg, progress=self._progress)
-
-            self.bg(job, on_done=lambda n: self.log(f"已补写 {n} 条排队待办"))
         if scheduler.status():
             self.log("计划任务：已注册每日同步/每周摘要")
             # 程序被挪过位置时旧任务会指向不存在的路径：稍后按当前位置重建
@@ -120,10 +113,47 @@ class App(tk.Tk):
         elif (self.cfg.get("schedule") or {}).get("enabled"):
             # 任务开着、任务表里却查不到（例如刚被上面的清理删掉）：同样走自愈重建
             self.after(2000, self._check_schedule_paths)
-        # 通知不再落盘，所以打开时现拉一次；但登录态已知过期时跳过，
-        # 免得刚开窗口就弹出浏览器登录框（那种情况下顶部横幅已经在提示了）
-        if not auth:
-            self.do_load_notices()
+        # 先补写后台排队的待办（不需要登录），再按保存的登录态自动加载内容。
+        # 启动时不直接读公告：没有保存登录信息就一个网络请求都不发；
+        # 有登录信息时先把课程读出来，再补公告 / 成绩 / 截止时间。
+        self.after(600, self._startup_load_sequence)
+
+    def _startup_load_sequence(self) -> None:
+        if self._busy:
+            self.after(300, self._startup_load_sequence)
+            return
+        pending = deskbox.pending_drafts()
+        if pending:
+            self.log(f"检测到 {len(pending)} 条后台排队待办，准备写入 DeskBox…")
+
+            def job():
+                return runner.flush_pending(self.cfg, progress=self._progress)
+
+            def done(count):
+                self.log(f"已补写 {count} 条排队待办")
+                self._auto_load_or_hint()
+
+            def failed(exc):
+                self.log(f"排队待办补写失败：{exc}")
+                self._auto_load_or_hint()
+
+            if not self.bg(job, on_done=done, on_error=failed):
+                self.after(300, self._startup_load_sequence)
+            return
+        self._auto_load_or_hint()
+
+    def _auto_load_or_hint(self) -> None:
+        """有保存的登录信息就静默检查并自动加载；没有就只提示，不碰网络。"""
+        if self._busy:
+            self.after(300, self._auto_load_or_hint)
+            return
+        if not SESSION_PATH.exists():
+            self.login_var.set("登录状态：未登录（点击「登录 / 刷新课程」）")
+            self.log("没有保存的登录信息：点击「登录 / 刷新课程」登录；"
+                     "登录成功后会自动读取课程、公告、成绩与截止时间")
+            return
+        self.login_var.set("登录状态：检查中…")
+        self.do_load_courses(auto=True)
 
     def _cleanup_renamed_leftovers(self) -> None:
         """改名（CanvasHelper -> Inferry）留下的一次性清理。
@@ -179,6 +209,13 @@ class App(tk.Tk):
 
     def _progress(self, msg: str) -> None:
         self.q.put(("progress", msg))
+
+    def _when_idle(self, fn) -> None:
+        """等当前后台任务结束再执行；用于启动阶段的多步加载。"""
+        if self._busy:
+            self.after(300, lambda: self._when_idle(fn))
+            return
+        fn()
 
     def bg(self, fn, on_done=None, on_error=None) -> bool:
         """在后台线程运行 fn，避免阻塞界面。"""
@@ -340,7 +377,7 @@ class App(tk.Tk):
         bar.pack(fill="x")
         ttk.Button(bar, text="全选", command=lambda: self._select_all(True)).pack(side="left")
         ttk.Button(bar, text="全不选", command=lambda: self._select_all(False)).pack(side="left", padx=6)
-        ttk.Button(bar, text="预览归档方案", command=self.do_preview).pack(side="left", padx=6)
+        ttk.Button(bar, text="预览 / 校验", command=self.do_preview).pack(side="left", padx=6)
         ttk.Button(bar, text="开始同步", command=self.do_sync).pack(side="left")
         ttk.Label(bar, text="（双击课程行可切换勾选）").pack(side="right")
 
@@ -884,6 +921,10 @@ class App(tk.Tk):
             self._upgrade_notes_pending = False
             if status.current_notes:
                 self.do_show_update(auto=True, just_updated=True)
+            elif status.ok and status.current_release is None:
+                # 本地版本领先线上（例如自己源码构建 / 还没发版）：不是错误，
+                # 别每次启动都报「没取到说明」
+                self.log(f"当前版本 v{__version__} 尚未发布，暂无本版说明")
             else:
                 self.log(f"已更新到 v{__version__}，但这次没取到本版说明"
                          "（可在设置页「查看更新公告」稍后再看）")
@@ -1193,6 +1234,7 @@ class App(tk.Tk):
         """首次运行：没配过站点地址 -> 先选学校。"""
         url = self.do_pick_school(ask_login=True)
         if not url:
+            self.login_var.set("登录状态：未登录（点击「登录 / 刷新课程」）")
             self.log("尚未选择院校。可点右上角「选择院校」随时设置。")
             return
 
@@ -1225,41 +1267,113 @@ class App(tk.Tk):
 
     # ---------- 动作 ----------
 
-    def do_load_courses(self) -> None:
+    def do_load_courses(self, auto: bool = False) -> None:
+        """登录并加载课程。
+
+        ``auto=True`` 只做无窗口探测：cookie 失效时直接返回，绝不弹登录窗；
+        手动点击（按钮 / 登录状态标签）才走 ``ensure_login``。
+        """
         from .auth import CanvasSession
         from .canvas_api import CanvasAPI
 
         def job():
             s = CanvasSession()
             try:
-                if not s.ensure_login(on_status=self._progress):
-                    raise RuntimeError("登录失败或超时")
+                if auto:
+                    try:
+                        s.start(headless=True)
+                    except Exception as exc:  # 浏览器缺失 / 启动失败
+                        log.warning("启动时检查登录态失败: %s", exc)
+                        return ("error", str(exc))
+                    if not s.is_logged_in():
+                        return None
+                    self._progress("已复用上次登录会话")
+                else:
+                    if not s.ensure_login(on_status=self._progress):
+                        raise RuntimeError("登录失败或超时")
                 api = CanvasAPI(s)
-                cs = api.courses()
-                return cs, s.profile
+                return api.courses(), s.profile
             finally:
                 s.close()
 
         def done(payload):
+            if payload is None:
+                self.login_var.set("登录状态：⚠ 已过期（点击重新登录）")
+                self.log("保存的登录信息已过期，本次没有读取公告；"
+                         "点击「登录 / 刷新课程」重新登录")
+                return
+            if isinstance(payload, tuple) and len(payload) == 2 and payload[0] == "error":
+                self.login_var.set("登录状态：检查失败（点击重试）")
+                self.log(f"启动时检查登录态失败：{payload[1]}")
+                return
             courses, profile = payload
-            self.courses = courses
-            name = (profile or {}).get("name") or (profile or {}).get("login_id") or ""
-            self.login_var.set(f"已登录：{name}" if name else "已登录")
-            folders = course_dirs(Path(self.cfg["classes_root"]))
-            self.course_folders = {}
-            self.tree.delete(*self.tree.get_children())
-            sel = set(self.cfg.get("selected_courses", []))
-            for c in courses:
-                folder = match_folder(c.short, folders)
-                self.course_folders[c.id] = folder
-                checked = "✔" if (c.id in sel or (not sel and folder)) else ""
-                self.tree.insert("", "end", values=(
-                    checked, c.id, f"{c.short} · {c.name}",
-                    folder.name if folder else "（未匹配，将自动新建）", "",
-                ))
-            self.log(f"识别到 {len(courses)} 门课程")
-            if not sel:
-                self._save_selection()
+            self._apply_courses(courses, profile)
+
+        self.bg(job, on_done=done)
+
+    def _apply_courses(self, courses, profile) -> None:
+        """把课程列表填进表格，然后自动补公告 / 成绩 / 截止时间。"""
+        self.courses = courses
+        name = (profile or {}).get("name") or (profile or {}).get("login_id") or ""
+        self.login_var.set(f"已登录：{name}" if name else "已登录")
+        folders = course_dirs(Path(self.cfg["classes_root"]))
+        self.course_folders = {}
+        self.tree.delete(*self.tree.get_children())
+        sel = set(self.cfg.get("selected_courses", []))
+        for c in courses:
+            folder = match_folder(c.short, folders)
+            self.course_folders[c.id] = folder
+            checked = "✔" if (c.id in sel or (not sel and folder)) else ""
+            self.tree.insert("", "end", values=(
+                checked, c.id, f"{c.short} · {c.name}",
+                folder.name if folder else "（未匹配，将自动新建）", "",
+            ))
+        self.log(f"识别到 {len(courses)} 门课程")
+        if not sel:
+            self._save_selection()
+        self._load_extras_async()
+
+    def _load_extras_async(self) -> None:
+        """课程出来后再读公告 / 成绩 / 截止时间，避免启动时先等公告。"""
+        if not self.courses or not SESSION_PATH.exists():
+            return
+        if self._busy:
+            self.after(300, self._load_extras_async)
+            return
+
+        def job():
+            return runner.load_dashboard_extras(
+                self.cfg, self.courses, progress=self._progress)
+
+        def done(bundle):
+            if bundle is None:
+                self.login_var.set("登录状态：⚠ 已过期（点击重新登录）")
+                self.log("读取内容时登录已过期；点击「登录 / 刷新课程」重新登录")
+                return
+            extras_cfg = self.cfg.get("extras") or {}
+            if extras_cfg.get("notices", True):
+                self.notices = self._serialize_notices(bundle.notices)
+                self.unread_var.set(
+                    f"共 {len(bundle.notices)} 条 · 未读 {len(bundle.unread)} 条")
+                self._refresh_notice_tree()
+            if extras_cfg.get("grades", True):
+                if self.result is None:
+                    from types import SimpleNamespace
+
+                    self.result = SimpleNamespace()
+                self.result.courses = self.courses
+                self.result.grades = bundle.grades
+                self._fill_grades(self.result)
+            if bundle.drafts:
+                if self.result is None:
+                    from types import SimpleNamespace
+
+                    self.result = SimpleNamespace()
+                self.result.drafts = bundle.drafts
+                self._fill_todo_tree(bundle.drafts, status="待写入")
+            for error in bundle.errors:
+                self.log(f"警告：{error}")
+            self._refresh_course_color_summary()
 
         self.bg(job, on_done=done)
 
@@ -1314,6 +1428,7 @@ class App(tk.Tk):
             self.preview.insert("end", res.text or "（无内容）")
             s = res.stats
             summary = (f"\n\n下载 {s.get('downloaded', 0)} 个文件 + {s.get('pages', 0)} 个页面，"
+                       f"本地复制 {s.get('copied', 0)} 项，"
                        f"已存在 {s.get('exists', 0)} 项，错误 {s.get('errors', 0)} 个")
             if s.get("archives"):
                 summary += (f"\n解压 {s['archives']} 个压缩包"

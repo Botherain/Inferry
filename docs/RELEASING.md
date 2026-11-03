@@ -8,20 +8,23 @@
 ```powershell
 python -m ruff check inferry tests scripts  # 0 错误
 python -m mypy                             # Success: no issues found
-python tests\smoke.py                      # 432 通过, 0 失败
-python -m pytest                           # 42 passed
+python tests\smoke.py                      # 全绿（条数以实际输出为准）
+python -m pytest                           # 全绿
+python scripts/check_version.py --tag vX.Y.Z
 ```
 
-改了 `pyproject.toml` 的 `version` 就必须同步改
-`inferry/__init__.py` 的 `__version__`——自检第 [9] 节会断言两者相等，
-不一致直接红。
+版本号只有 `inferry/version.py` 一处：`pyproject.toml` 用动态版本读它，
+`setup.py` / `Inferry.spec` 也读同一处；**不要**再改 `__init__.py` 或
+`pyproject.toml` 里的版本字面量。CI 会跑 `scripts/check_version.py` 防止接线被改坏。
 
 CI（`lint` + `smoke` × Python 3.9/3.10/3.11/3.12/3.13/3.14）全绿后才能发。
 
 ## 2. 版本与变更
 
-- 版本号：语义化版本，改 `pyproject.toml` 与 `__init__.py` 两处。
-- `CHANGELOG.md`：把 `[未发布]` 下的内容挪进新的版本小节，补日期。
+- 版本号：语义化版本，只改 `inferry/version.py`；升位规则、预发布通道、产物命名
+  见 [`VERSIONING.md`](VERSIONING.md)。
+- `CHANGELOG.md`：把 `[Unreleased]` 下的内容挪进新的版本小节，补日期；
+  预发布版本同样写规范版本号（`## [2.2.0rc1] - YYYY-MM-DD`）。
 - **`CHANGELOG` 的这一节会原样变成应用内的「更新公告」**：`release.yml` 用
   `^## \[<version>\]` 抓出正文写成 Release body，客户端（`inferry/updater.py`）
   再把 body 显示在公告窗里。所以：写给人看、别写只有开发者懂的内部编号；
@@ -188,9 +191,10 @@ signtool verify /pa dist\Inferry\Inferry.exe
 
 - [ ] `ruff` / `mypy` / `smoke` / `pytest` 四项本地全绿
 - [ ] CI 六个 Python 版本全绿
-- [ ] `pyproject.toml` 与 `__version__` 一致
-- [ ] `CHANGELOG.md` 的 `[未发布]` 挪进新小节并写日期
-- [ ] 打标签 `git tag vX.Y.Z && git push origin vX.Y.Z`（自动出包并发布 Release）
+- [ ] `python scripts/check_version.py --tag vX.Y.Z` 通过（唯一来源与 tag 一致）
+- [ ] `CHANGELOG.md` 的 `[Unreleased]` 挪进新小节并写日期
+- [ ] 打标签 `git tag -a vX.Y.Z -m "Inferry vX.Y.Z" && git push origin vX.Y.Z`
+      （自动出包并发布 Release；预发布由版本号自动标记）
 - [ ] 发布后跑一次 `python -m inferry update --brief`：确认应用内能看到这条版本
       与公告（它读的就是刚发的 Release；`--download` 可顺带验证下载包与 sha256）
 - [ ] 下载 Release 里的 zip，确认：根目录有 `README.txt` 与 `uninstall.bat`/`uninstall.ps1`、
@@ -211,7 +215,7 @@ signtool verify /pa dist\Inferry\Inferry.exe
 | 位置 | 改动 | 兜底 / 迁移 |
 | --- | --- | --- |
 | `inferry/`（原 `canvas_helper/`） | 包名与全部 import、测试路径 | 无（源码用户重装即可） |
-| `inferry/__init__.py` | `APP_NAME = "Inferry"`、`__version__ = "2.0.0"` | 窗口标题、`--version` 自动跟随 |
+| `inferry/version.py`（2.1.0 起） | `__version__` 的唯一来源（2.0.0 时还在 `__init__.py`） | `--version`、wheel、exe 属性、更新检查全部跟随 |
 | `inferry/paths.py` | `DATA_DIR = %LOCALAPPDATA%\Inferry` | `_migrate_data_dir()`：旧目录在、新目录不在 → 整目录 rename；两个都在 → 用新的并告警；搬不动 → 继续用旧目录，下次启动重试 |
 | `inferry/scheduler.py` | 任务名 `Inferry-DailySync` / `-WeeklyReport` | `cleanup_legacy()` 启动时删掉 `CanvasHelper-*`；`state.schedule_cmd` 不一致会触发自愈重建 |
 | `inferry/shortcut.py` | `LNK_NAME = "Inferry"` | `remove_legacy()` 只删「目标 exe 已不存在」的 `CanvasHelper.lnk` |

@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .canvas_api import CanvasAPI, Course, Item
-from .classify import build_local_index, ensure_parent, plan_item, sanitize, unique_path
+from .classify import (
+    CategoryDirs,
+    build_local_index,
+    ensure_parent,
+    plan_item,
+    sanitize,
+    tutorial_target,
+    unique_path,
+)
 from .paths import get_logger, now_local
 
 log = get_logger()
@@ -18,9 +27,11 @@ ProgressCb = Callable[[str], None]
 class PlannedFile:
     item: Item
     target: Path
-    action: str  # download / exists / rename / page / skip
+    action: str  # download / copy / exists / rename / page / skip
     size: int | None = None
     note: str = ""
+    #: action == "copy" 时的本地来源（同名同大小的既有副本）
+    source: Path | None = None
 
 
 @dataclass
@@ -33,6 +44,10 @@ class CoursePlan:
     @property
     def downloads(self) -> list[PlannedFile]:
         return [f for f in self.files if f.action in ("download", "rename", "page")]
+
+    @property
+    def copies(self) -> list[PlannedFile]:
+        return [f for f in self.files if f.action == "copy"]
 
     @property
     def up_to_date(self) -> list[PlannedFile]:
@@ -60,6 +75,12 @@ def _page_html(course: Course, item: Item, body: str) -> str:
 def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> CoursePlan:
     plan = CoursePlan(course=course, folder=folder)
     local = build_local_index(folder)  # 索引：归一化名 -> [(大小, 路径)]
+    cats = CategoryDirs.scan(folder)
+
+    def copy_from(item: Item, target: Path, size: int | None, source: Path,
+                  prefix: str = "本地复制") -> PlannedFile:
+        return PlannedFile(item, target, "copy", size,
+                           f"{prefix}：{_rel(source, folder)}", source=source)
 
     for item in items:
         if item.kind == "File" and not (item.file_url or item.file_id):
@@ -69,6 +90,8 @@ def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> 
 
         key = _state_key(course.id, item)
         recorded = state.get("files", {}).get(key)
+        rec_path = Path(recorded.get("path") or "") if recorded else None
+        grouped = tutorial_target(folder, item, cats) is not None
 
         if item.kind in ("Page", "Discussion"):
             if item.kind == "Page":
@@ -79,7 +102,7 @@ def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> 
                 fresh, done = "讨论帖快照", "讨论帖已保存"
             if not body:
                 continue
-            target = plan_item(folder, item)
+            target = plan_item(folder, item, cats)
             if not target.name.lower().endswith((".html", ".htm")):
                 target = target.with_suffix(".html")
             if target.exists() and recorded and recorded.get("kind") == "page":
@@ -88,12 +111,19 @@ def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> 
                 plan.files.append(PlannedFile(item, target, "page", note=fresh))
             continue
 
-        target = plan_item(folder, item)
-
+        target = plan_item(folder, item, cats)
         size = item.file_size
-        if recorded and recorded.get("size") == size and Path(recorded.get("path", "")).exists():
-            plan.files.append(PlannedFile(item, Path(recorded["path"]), "exists", size, "已是最新"))
-            continue
+        if (recorded and rec_path is not None and recorded.get("size") == size
+                and rec_path.is_file()):
+            if rec_path.parent == target.parent:
+                plan.files.append(PlannedFile(item, rec_path, "exists", size, "已是最新"))
+                continue
+            if not target.exists():
+                # 上次记录的位置与当前结构不一致（老规则 / 手工搬过）：
+                # 按当前结构补一份，原位置保留（只增不删）
+                plan.files.append(copy_from(
+                    item, target, size, rec_path, "按上次记录复制"))
+                continue
 
         # 同名不同内容 -> 内容可能放在别的分类里，或上次已存成 x (1).pptx
         hit = local.find(item.display_name, size)
@@ -103,7 +133,13 @@ def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> 
             if size is None or actual == size:
                 plan.files.append(PlannedFile(item, target, "exists", actual, "本地已存在"))
                 continue
-            if hit is not None and hit != target:
+            if grouped and hit is not None and hit.parent == target.parent:
+                # 同名的画布原版已经以 (1) 形式躺在教程目录里（本地那份多半是
+                # 自己标注过的副本）——保持幂等，不要每次同步再加一个 (2)
+                plan.files.append(
+                    PlannedFile(item, hit, "exists", size, "本地已有同内容文件"))
+                continue
+            if not grouped and hit is not None and hit != target:
                 plan.files.append(
                     PlannedFile(item, hit, "exists", size, "本地已有同内容文件"))
                 continue
@@ -112,8 +148,18 @@ def build_plan(course: Course, folder: Path, items: list[Item], state: dict) -> 
             continue
 
         if hit is not None:
-            plan.files.append(
-                PlannedFile(item, hit, "exists", size, "本地已有同内容文件"))
+            if hit.parent == target.parent:
+                # 目标文件夹里已经有这份内容（旧名 / (1) 副本）
+                plan.files.append(
+                    PlannedFile(item, hit, "exists", size, "本地已有同内容文件"))
+            elif grouped or not same_tree(hit.parent, target.parent):
+                # Tutorial 分组：旧布局（画布目录 / 平铺 / 旧年份）里的教程文件
+                # 复制进各自的 TutorialN；其它分类的跨分支同内容也补一份副本。
+                # 一律复制、不搬原文件：只增不删，且不会破坏原目录里的相对引用。
+                plan.files.append(copy_from(item, target, size, hit))
+            else:
+                plan.files.append(
+                    PlannedFile(item, hit, "exists", size, "本地已有同内容文件"))
             continue
 
         note = "讨论区链接" if item.extra.get("link_source") == "discussion" else ""
@@ -131,8 +177,33 @@ def _append_archive_notes(plan: CoursePlan, state: dict) -> None:
         if pf.item.kind != "File":
             continue
         extra = extract.plan_note(pf.target, state)
+        if extra and pf.action == "copy" and extra.startswith("下载后"):
+            extra = "复制后" + extra[len("下载后"):]
         if extra:
             pf.note = f"{pf.note} · {extra}" if pf.note else extra
+
+
+def _rel(path: Path, root: Path) -> str:
+    """相对课程目录的展示路径；不在目录内时退回绝对路径。"""
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def same_tree(a: Path, b: Path) -> bool:
+    """两个目录是否互为祖先：同一子树里的浅层 / 深层关系。
+
+    用来区分「同一分类里改过名、或压在分类根目录的副本」（视为已有）与
+    「另一套目录结构里的同名副本」（需要复制到画布位置，否则整层缺失）。
+    """
+    for left, right in ((a, b), (b, a)):
+        try:
+            left.relative_to(right)
+            return True
+        except ValueError:
+            continue
+    return False
 
 
 def execute_plan(
@@ -147,8 +218,8 @@ def execute_plan(
     from .paths import load_config
 
     arc_cfg = extract.cfg_archives(load_config())
-    stats = {"downloaded": 0, "pages": 0, "exists": 0, "bytes": 0, "errors": 0,
-             "archives": 0, "archive_files": 0}
+    stats = {"downloaded": 0, "copied": 0, "pages": 0, "exists": 0,
+             "bytes": 0, "errors": 0, "archives": 0, "archive_files": 0}
     dirty = False
 
     def _extract_one(pf: PlannedFile, plan: CoursePlan) -> bool:
@@ -180,6 +251,20 @@ def execute_plan(
                     dirty = True
                 continue
             try:
+                if pf.action == "copy" and pf.source and pf.source.is_file():
+                    ensure_parent(pf.target)
+                    if pf.target.exists():
+                        pf.target = unique_path(pf.target)
+                    progress(f"复制 {plan.course.short} · {pf.source.name}"
+                             f" → {_rel(pf.target, plan.folder)}")
+                    shutil.copy2(pf.source, pf.target)
+                    stats["copied"] += 1
+                    _record(state, plan.course.id, pf.item, pf.target,
+                            size=pf.target.stat().st_size)
+                    dirty = True
+                    if pf.item.kind == "File" and _extract_one(pf, plan):
+                        dirty = True
+                    continue
                 ensure_parent(pf.target)
                 if pf.action == "page":
                     if pf.item.kind == "Discussion":
@@ -243,22 +328,31 @@ def describe(plans: list[CoursePlan]) -> str:
             lines.append("   （没有可同步内容）")
             continue
         for pf in plan.files:
-            mark = {"download": "＋", "rename": "＋*", "page": "＋◇", "exists": "＝"}[pf.action]
+            mark = {"download": "＋", "copy": "⇄", "rename": "＋*",
+                    "page": "＋◇", "exists": "＝"}[pf.action]
             try:
                 shown = pf.target.relative_to(plan.folder)
             except ValueError:
                 shown = pf.target
-            size_txt = f"  ({_fmt_size(pf.size)})" if (pf.size and pf.action != "exists") else ""
+            size_txt = (f"  ({_fmt_size(pf.size)})"
+                        if (pf.size and pf.action != "exists") else "")
             lines.append(
                 f"   {mark} {shown}  [{_kind_label(pf)}]{size_txt}"
                 f"{('  ' + pf.note) if pf.note else ''}"
             )
     total_dl = sum(len(p.downloads) for p in plans)
+    total_copy = sum(len(p.copies) for p in plans)
     total_ok = sum(len(p.up_to_date) for p in plans)
     total_bytes = sum(pf.size or 0 for p in plans for pf in p.downloads)
+    total_pages = sum(1 for p in plans for pf in p.files if pf.action == "page")
+    detail = [f"下载 {total_dl - total_pages} 项、约 {_fmt_size(total_bytes)}"]
+    if total_pages:
+        detail.append(f"页面快照 {total_pages} 项")
+    if total_copy:
+        detail.append(f"本地复制 {total_copy} 项")
     lines.append(
-        f"\n合计：新增/更新 {total_dl} 项（约 {_fmt_size(total_bytes)}），"
-        f"已存在 {total_ok} 项"
+        f"\n合计：新增/更新 {total_dl + total_copy} 项"
+        f"（{'；'.join(detail)}），已存在 {total_ok} 项"
     )
     return "\n".join(lines)
 
