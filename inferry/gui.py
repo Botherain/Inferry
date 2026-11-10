@@ -1364,12 +1364,13 @@ class App(tk.Tk):
                 self.result.courses = self.courses
                 self.result.grades = bundle.grades
                 self._fill_grades(self.result)
-            if bundle.drafts:
+            if bundle.drafts or bundle.past:
                 if self.result is None:
                     from types import SimpleNamespace
 
                     self.result = SimpleNamespace()
                 self.result.drafts = bundle.drafts
+                self.result.past_drafts = bundle.past
                 self._fill_todo_tree(bundle.drafts, status="待写入")
             for error in bundle.errors:
                 self.log(f"警告：{error}")
@@ -1439,6 +1440,8 @@ class App(tk.Tk):
             ts = res.todo_stats or {}
             if ts.get("recolored"):
                 summary += f"，更新 {ts['recolored']} 条颜色"
+            if ts.get("rescheduled"):
+                summary += f"，更新 {ts['rescheduled']} 条截止时间"
             if ts.get("resorted"):
                 summary += f"，重排 {ts['resorted']} 条"
             summary += f"\n未读通知 {len(res.unread)} 条；成绩文件 {len(res.grade_files)} 个"
@@ -1464,13 +1467,16 @@ class App(tk.Tk):
         def job():
             return runner.collect_deadlines(self.cfg, progress=self._progress)
 
-        def done(drafts):
+        def done(result):
+            drafts = result.drafts
             self._fill_todo_tree(drafts, status="待写入")
             if self.result is None:
                 from types import SimpleNamespace
-                self.result = SimpleNamespace(drafts=drafts)
+
+                self.result = SimpleNamespace(drafts=drafts, past_drafts=result.past)
             else:
                 self.result.drafts = drafts
+                self.result.past_drafts = result.past
             self._refresh_course_color_summary()
 
         self.bg(job, on_done=done)
@@ -1485,7 +1491,7 @@ class App(tk.Tk):
             if d.status == "completed":
                 state = "已完成"
                 done_n += 1
-            elif d.status == "reopened":
+            elif d.status == "reopened" or d.status == "rescheduled":
                 state = "截止已更新"
             elif id(d) in added_ids:
                 state = "新增"
@@ -1519,7 +1525,9 @@ class App(tk.Tk):
 
         def job():
             todo_path = Path(self.cfg["deskbox"]["todo_path"])
-            tmp, added, st = deskbox.prepare(todo_path, drafts, self.cfg["deskbox"])
+            tmp, added, st = deskbox.prepare(
+                todo_path, drafts, self.cfg["deskbox"],
+                reconcile=getattr(self.result, "past_drafts", None))
             if not st.get("changed"):
                 return {"added": 0, "mode": "none", "st": st}
             if deskbox.is_running():

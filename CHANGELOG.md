@@ -5,6 +5,18 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.1.1] - 2026-11-10
+
+### 修复 · 截止时间修改同步
+
+- **老师改期后，DeskBox 里的同一条待办会原地更新**：未完成条目的 `dueDate` 直接
+  改成 Canvas 的新值，并清空旧的「已提醒 / 已忽略 / 稍后提醒」状态，到新时间会
+  重新提醒；不再一直显示旧日期，也不会额外长出一条重复待办。
+- **已完成条目**的截止时间同样跟随 Canvas 对齐，保留完成状态与完成时间。
+- **已经过期、不再进入待办列表的作业**也会用新日期修正已有条目（只改期、不新增）。
+- 预览与待办列表新增「截止已更新」状态；同步统计与日志新增「N 项截止时间已原地更新」。
+- 修复前因改期而残留的旧日期，会在下一次同步时自动校正。
+
 ## [2.1.0] - 2026-11-03
 
 ### 改动 · 版本号架构
@@ -700,7 +712,7 @@ Edge 缺失时的浏览器兜底，并把「打包 + 发布」整条链路自动
   脚本入口与 pytest 双跑，Windows runner。
 - 计划任务在真实环境跑通验证，`schedule.enabled` 默认仍为 `False`（不替用户做决定）。
 
-[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.1.1...HEAD
 [1.2.1]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.1.0

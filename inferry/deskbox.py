@@ -86,6 +86,8 @@ class TodoDraft:
 @dataclass
 class TodoBuildResult:
     drafts: list[TodoDraft] = field(default_factory=list)
+    #: 已过期的草稿：不新增、不显示，只用来把已有待办的截止时间改对
+    past: list[TodoDraft] = field(default_factory=list)
     skipped_past: int = 0
 
 
@@ -115,6 +117,22 @@ def _parse_due(value: str | None) -> datetime | None:
 
 def _fmt_due(dt: datetime) -> str:
     return dt.isoformat(timespec="seconds")
+
+
+def _touch_due(item: dict, due_text: str | None) -> None:
+    """把已有待办的截止时间改成新值，并清掉旧的提醒状态。
+
+    只改截止时间，不动完成状态、颜色、备注与附件：老师改期后，DeskBox 里的
+    同一条待办应该原地更新，而不是再长出一条。未完成的条目要重新提醒，所以
+    把「上次提醒 / 已忽略 / 稍后提醒」一并清空。
+    """
+    item["dueDate"] = due_text
+    item["updatedAt"] = datetime.now(UTC).isoformat(timespec="microseconds")
+    if not item.get("isCompleted"):
+        item["reminderLastNotifiedAt"] = None
+        item["reminderDismissedForDueDate"] = None
+        item["snoozedUntil"] = None
+        item["snoozeLastNotifiedAt"] = None
 
 
 # ---------- 待办颜色 ----------
@@ -385,9 +403,6 @@ def build_drafts(
             due = _parse_due(item.due_at)
             if due is None:
                 continue
-            if due < cutoff:
-                result.skipped_past += 1
-                continue
             if (due - cutoff).days > only_future_days:
                 continue
             k = kind_of(item, item.module_name)
@@ -400,19 +415,23 @@ def build_drafts(
             if url:
                 notes_parts.append(f"打开：{url}")
             attach = attachment_lookup.get((cid, item.file_id))
-            result.drafts.append(
-                TodoDraft(
-                    item=item,
-                    course=course,
-                    text=f"{course.short} · {item.title}",
-                    due=due,
-                    kind=k,
-                    url=url,
-                    color=course_colors.get(str(cid)) or _KIND_COLOR[k],
-                    notes="\n\n".join(notes_parts),
-                    attachment=attach,
-                )
+            draft = TodoDraft(
+                item=item,
+                course=course,
+                text=f"{course.short} · {item.title}",
+                due=due,
+                kind=k,
+                url=url,
+                color=course_colors.get(str(cid)) or _KIND_COLOR[k],
+                notes="\n\n".join(notes_parts),
+                attachment=attach,
             )
+            if due < cutoff:
+                # 过期项不新增，但老师把截止时间改到过去时，已有待办要跟着改
+                result.skipped_past += 1
+                result.past.append(draft)
+                continue
+            result.drafts.append(draft)
     result.drafts.sort(key=lambda d: d.due or now_local())
     return result
 
@@ -548,6 +567,7 @@ def merge(
     *,
     done_index: dict[str, dict] | None = None,
     stats: dict | None = None,
+    reconcile: list[TodoDraft] | None = None,
 ) -> tuple[dict, list[TodoDraft]]:
     """把草稿合并进 todo.json。
 
@@ -567,8 +587,26 @@ def merge(
     by_key, by_text = _index_items(doc)
     added: list[TodoDraft] = []
     order = max([it.get("sortOrder", 0) for it in doc.get("items", [])] + [0]) + 1
-    counts = {"added": 0, "existing": 0, "completed": 0, "reopened": 0}
-    dirty = False
+    counts = {"added": 0, "existing": 0, "completed": 0, "reopened": 0,
+              "rescheduled": 0}
+    dirty = False   # done_index 有变化
+    changed = False  # todo.json 本身有变化
+
+    # 过期草稿只做「改期」：不新增、不弹提醒，只把已有同一条待办的截止时间改对。
+    # 老师把截止时间改到过去时，这条路径保证 DeskBox 不会一直显示旧日期。
+    for d in reconcile or []:
+        due_text = _fmt_due(d.due) if d.due else None
+        item = by_key.get(d.key)
+        if item is None and d.text:
+            item = by_text.get(_norm_text(d.text))
+        if item is None or _same_due(item.get("dueDate"), due_text):
+            continue
+        _touch_due(item, due_text)
+        changed = True
+        if not item.get("isCompleted"):
+            counts["rescheduled"] += 1
+            d.existing = True
+            d.status = "rescheduled"
 
     for d in drafts:
         due_text = _fmt_due(d.due) if d.due else None
@@ -579,13 +617,24 @@ def merge(
 
         if item is not None:
             d.existing = True
+            due_changed = not _same_due(item.get("dueDate"), due_text)
             if item.get("isCompleted"):
                 counts["completed"] += 1
                 d.status = "completed"
+                if due_changed:
+                    # 已完成条目的截止时间也跟 Canvas 对齐（保留完成状态）
+                    _touch_due(item, due_text)
+                    changed = True
                 rec = {"dueDate": due_text, "completedAt": item.get("completedAt")}
                 if done.get(d.key) != rec:
                     done[d.key] = rec
                     dirty = True
+            elif due_changed:
+                # 老师改期：原地更新同一条待办，并清掉旧提醒状态
+                _touch_due(item, due_text)
+                counts["rescheduled"] += 1
+                d.status = "rescheduled"
+                changed = True
             else:
                 counts["existing"] += 1
             continue
@@ -606,10 +655,12 @@ def merge(
         by_key[d.key] = doc["items"][-1]
         added.append(d)
         counts["added"] += 1
+        changed = True
         order += 1
 
     stats.update(counts)
     stats["done_dirty"] = dirty
+    stats["changed"] = changed
     return doc, added
 
 
@@ -626,16 +677,21 @@ def preview_status(doc_path: Path, drafts: list[TodoDraft]) -> dict[str, str]:
     done = load_done_index()
     out: dict[str, str] = {}
     for d in drafts:
+        due_text = _fmt_due(d.due) if d.due else None
         item = by_key.get(d.key)
         if item is None and d.text:
             item = by_text.get(_norm_text(d.text))
         if item is not None:
-            out[d.key] = "completed" if item.get("isCompleted") else "existing"
+            if item.get("isCompleted"):
+                out[d.key] = "completed"
+            elif not _same_due(item.get("dueDate"), due_text):
+                out[d.key] = "rescheduled"
+            else:
+                out[d.key] = "existing"
             continue
         rec = done.get(d.key)
         if rec is None:
             continue
-        due_text = _fmt_due(d.due) if d.due else None
         out[d.key] = "completed" if _same_due(rec.get("dueDate"), due_text) else "reopened"
     return out
 
@@ -693,8 +749,12 @@ def write_copy(doc: dict, todo_path: Path) -> Path:
     return tmp
 
 
-def prepare(doc_path: Path, drafts: list[TodoDraft], cfg: dict) -> tuple[Path, list[TodoDraft], dict]:
-    """读取 -> 去重 -> 合并 -> 上色/排序 -> 写副本，返回 (副本路径, 新增草稿, 统计)。"""
+def prepare(doc_path: Path, drafts: list[TodoDraft], cfg: dict,
+            reconcile: list[TodoDraft] | None = None) -> tuple[Path, list[TodoDraft], dict]:
+    """读取 -> 去重 -> 合并 -> 上色/排序 -> 写副本，返回 (副本路径, 新增草稿, 统计)。
+
+    ``reconcile`` 是已过期、只用于改期的草稿（不会新增）。
+    """
     doc = load_doc(doc_path)
     if cfg.get("fix_attachment_paths", True):
         fix_paths(doc)
@@ -706,7 +766,7 @@ def prepare(doc_path: Path, drafts: list[TodoDraft], cfg: dict) -> tuple[Path, l
     mstats: dict = {}
     doc, added = merge(
         doc, drafts, int(cfg.get("reminder_offset_minutes", 1440)),
-        done_index=done_index, stats=mstats,
+        done_index=done_index, stats=mstats, reconcile=reconcile,
     )
     if mstats.get("done_dirty"):
         save_done_index(done_index)
@@ -728,16 +788,20 @@ def prepare(doc_path: Path, drafts: list[TodoDraft], cfg: dict) -> tuple[Path, l
         "existing": mstats.get("existing", 0),
         "completed": mstats.get("completed", 0),
         "reopened": mstats.get("reopened", 0),
+        "rescheduled": mstats.get("rescheduled", 0),
         "deduped": len(deduped),
         "recolored": recolored,
         "resorted": resorted,
         "fixed_paths": True,
-        "changed": bool(added) or bool(deduped) or recolored > 0 or resorted > 0,
+        "changed": (bool(added) or bool(deduped) or recolored > 0 or resorted > 0
+                    or bool(mstats.get("changed"))),
     }
     if deduped:
         log.info("已移除 %d 条未完成的重复待办", len(deduped))
     if stats["completed"]:
         log.info("%d 项已完成，未重复添加", stats["completed"])
+    if stats["rescheduled"]:
+        log.info("%d 项截止时间已更新（原地修改）", stats["rescheduled"])
     if stats["reopened"]:
         log.info("%d 项截止时间已更新，重新添加为新待办", stats["reopened"])
     if recolored:

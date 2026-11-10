@@ -392,6 +392,93 @@ def s5b_completed() -> None:
     merge(doc4, [d4], 1440, stats=st4)
     check("文本兜底也能认出已完成", st4.get("completed") == 1, str(st4))
 
+    # (4b) 未完成条目的截止时间被老师改了 -> 原地更新，不新增
+    old_due = "2026-11-11T19:00:00+08:00"
+    new_due = "2026-11-13T19:00:00+08:00"
+    url_b = "https://canvas.example.edu/courses/1/assignments/7002"
+    doc_rs = {"version": 3, "items": [{
+        "id": "r1", "text": "CS0001 · Project Proposal", "isCompleted": False,
+        "dueDate": old_due, "notes": f"打开：{url_b}", "sortOrder": 1,
+        "reminderLastNotifiedAt": "2026-11-10T10:00:00+00:00",
+        "reminderDismissedForDueDate": old_due,
+        "snoozedUntil": "2026-11-12T00:00:00+00:00",
+        "snoozeLastNotifiedAt": "2026-11-10T10:00:00+00:00",
+        "colorMarker": "red",
+    }]}
+    d_rs = _draft("Project Proposal", url_b, new_due)
+    st_rs: dict = {}
+    doc_rs, added_rs = merge(doc_rs, [d_rs], 1440, stats=st_rs)
+    rs_item = doc_rs["items"][0]
+    check("改期：原地更新不新增",
+          len(added_rs) == 0 and len(doc_rs["items"]) == 1, str(len(doc_rs["items"])))
+    check("改期：dueDate 更新为 Canvas 值",
+          rs_item["dueDate"] == new_due, str(rs_item.get("dueDate")))
+    check("改期：清掉旧提醒 / 稍后提醒状态",
+          rs_item["reminderLastNotifiedAt"] is None
+          and rs_item["reminderDismissedForDueDate"] is None
+          and rs_item["snoozedUntil"] is None
+          and rs_item["snoozeLastNotifiedAt"] is None,
+          str({k: rs_item.get(k) for k in ("reminderLastNotifiedAt",
+                                           "reminderDismissedForDueDate",
+                                           "snoozedUntil", "snoozeLastNotifiedAt")}))
+    check("改期：状态=截止已更新", d_rs.status == "rescheduled", d_rs.status)
+    check("改期：统计与 changed", st_rs.get("rescheduled") == 1 and st_rs.get("changed"),
+          str(st_rs))
+    check("改期：颜色 / 备注不动",
+          rs_item["colorMarker"] == "red" and url_b in (rs_item.get("notes") or ""),
+          str(rs_item.get("colorMarker")))
+    st_rs2: dict = {}
+    merge(doc_rs, [d_rs], 1440, stats=st_rs2)
+    check("改期后再次合并不再改动",
+          st_rs2.get("existing") == 1 and not st_rs2.get("changed"), str(st_rs2))
+
+    # (4c) 已完成条目改期：dueDate 跟着改，完成状态保留
+    doc_done = {"version": 3, "items": [{
+        "id": "r2", "text": "CS0001 · Assignment A", "isCompleted": True,
+        "dueDate": due_a, "notes": f"打开：{url_a}", "sortOrder": 1,
+    }]}
+    d_done = _draft("Assignment A", url_a, "2026-11-09T23:59:00+08:00")
+    st_done: dict = {}
+    doc_done, _ = merge(doc_done, [d_done], 1440, stats=st_done)
+    check("已完成改期：dueDate 更新且保持完成",
+          doc_done["items"][0]["dueDate"] == "2026-11-09T23:59:00+08:00"
+          and doc_done["items"][0]["isCompleted"], str(doc_done["items"][0]))
+    check("已完成改期：不新增、仍计完成",
+          st_done.get("completed") == 1 and not st_done.get("rescheduled")
+          and len(doc_done["items"]) == 1, str(st_done))
+
+    # (4d) 只读预判也能看出「截止已更新」
+    prev_rs = Path(tempfile.mkdtemp(prefix="ch_prev_rs_")) / "todo.json"
+    prev_rs.write_text(json.dumps({"version": 3, "items": [{
+        "id": "x", "text": "CS0001 · Project Proposal", "isCompleted": False,
+        "dueDate": old_due, "notes": f"打开：{url_b}",
+    }]}, ensure_ascii=False), encoding="utf-8")
+    got_rs = preview_status(prev_rs, [d_rs])
+    check("预判改期", got_rs.get(d_rs.key) == "rescheduled", str(got_rs))
+    shutil.rmtree(prev_rs.parent, ignore_errors=True)
+
+    # (4e) 过期改期：只更新已有待办，不新增
+    doc_p = {"version": 3, "items": [{
+        "id": "p1", "text": "CS0001 · Old Quiz", "isCompleted": False,
+        "dueDate": "2026-11-01T00:00:00+08:00", "notes": "",
+    }]}
+    d_p = _draft("Old Quiz", "", "2026-10-01T00:00:00+08:00")
+    st_p: dict = {}
+    doc_p, added_p = merge(doc_p, [], 1440, stats=st_p, reconcile=[d_p])
+    check("过期改期：只更新已有、不新增",
+          not added_p and len(doc_p["items"]) == 1
+          and doc_p["items"][0]["dueDate"] == "2026-10-01T00:00:00+08:00"
+          and st_p.get("rescheduled") == 1 and st_p.get("changed"), str(st_p))
+
+    # (4f) 过期作业不进入待写入列表，只进入改期用的 past
+    past_item = Item(course_id=1, module_name="", title="Past Quiz", kind="Quiz",
+                     due_at="2020-01-01T00:00:00Z", html_url="https://x/past")
+    built = build_drafts({1: Course(id=1, name="Vision", code="CS0001")},
+                         {1: [past_item]})
+    check("过期作业进入 past 而非待写入列表",
+          not built.drafts and len(built.past) == 1 and built.skipped_past == 1,
+          str((len(built.drafts), len(built.past), built.skipped_past)))
+
     # (5) 无链接草稿的 key 用统一时间格式（否则永远匹配不上）
     check("草稿 key 与 todo.json 时间格式一致",
           d4.key == "CS0001 · Quiz 1|2026-11-03T23:59:00+08:00", d4.key)

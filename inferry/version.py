@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass
 
 #: 唯一需要手改的一行（发布号用 PEP 440 写法）
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 #: 数字段 1~3 个（``1.4`` 视作 ``1.4.0``）；第 4 段起一律拒绝
 _BASE_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?")

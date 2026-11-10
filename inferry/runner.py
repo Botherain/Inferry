@@ -30,7 +30,8 @@ log = get_logger()
 Progress = Callable[[str], None]
 _nop = lambda m: None  # noqa: E731
 
-_STATUS_CN = {"completed": "已完成", "existing": "已存在", "reopened": "截止已更新"}
+_STATUS_CN = {"completed": "已完成", "existing": "已存在", "reopened": "截止已更新",
+              "rescheduled": "截止已更新"}
 
 
 @dataclass
@@ -39,6 +40,8 @@ class SyncResult:
     plans: list[CoursePlan] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     drafts: list = field(default_factory=list)
+    #: 已过期的草稿：只用于把已有待办的截止时间改对，不新增
+    past_drafts: list = field(default_factory=list)
     todo_added: list = field(default_factory=list)
     todo_total_drafts: int = 0
     todo_mode: str = "none"
@@ -63,6 +66,8 @@ def _todo_summary(added: int, st: dict) -> str:
     parts = [f"待办新增 {added} 条"]
     if st.get("completed"):
         parts.append(f"{st['completed']} 项已完成，未重复添加")
+    if st.get("rescheduled"):
+        parts.append(f"{st['rescheduled']} 项截止时间已原地更新")
     if st.get("reopened"):
         parts.append(f"{st['reopened']} 项截止时间已更新，重新提醒")
     if st.get("existing"):
@@ -251,6 +256,7 @@ def run_sync(
             cfg=cfg,
         )
         res.drafts = drafts.drafts
+        res.past_drafts = drafts.past
         res.todo_total_drafts = len(drafts.drafts)
 
         # 预判这些截止时间在 DeskBox 里的现状（只读），避免重复添加已完成的作业
@@ -307,7 +313,8 @@ def run_sync(
                 progress(f"待办已排队 {n} 条（下次打开 GUI 时写入）")
             else:
                 todo_path = Path(cfg["deskbox"]["todo_path"])
-                tmp, added, st = deskbox.prepare(todo_path, draft_list, cfg["deskbox"])
+                tmp, added, st = deskbox.prepare(todo_path, draft_list, cfg["deskbox"],
+                                                reconcile=drafts.past)
                 res.todo_added = added
                 res.todo_stats = st
                 if not st.get("changed"):
@@ -418,6 +425,7 @@ class DashboardExtras:
     unread: list = field(default_factory=list)
     grades: dict = field(default_factory=dict)
     drafts: list = field(default_factory=list)
+    past: list = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -525,6 +533,7 @@ def load_dashboard_extras(
             result = deskbox.build_drafts(
                 {c.id: c for c in selected}, items_by_course, cfg=cfg)
             bundle.drafts = result.drafts
+            bundle.past = result.past
             desk_cfg = cfg.get("deskbox") or {}
             if desk_cfg.get("enabled", True) and desk_cfg.get("todo_path"):
                 try:
@@ -547,13 +556,14 @@ def load_dashboard_extras(
             session.close()
 
 
-def collect_deadlines(cfg: dict | None = None, progress: Progress = _nop) -> list:
-    """只读取作业/测验截止时间，生成待办草稿。"""
+def collect_deadlines(cfg: dict | None = None,
+                      progress: Progress = _nop) -> deskbox.TodoBuildResult:
+    """只读取作业/测验截止时间，生成待办草稿（含仅用于改期的过期项）。"""
     cfg = cfg or load_config()
     session = CanvasSession()
     try:
         if not session.ensure_login(on_status=progress):
-            return []
+            return deskbox.TodoBuildResult()
         api = CanvasAPI(session)
         courses, _folders = resolve_courses(cfg, api)
         items_by_course: dict[int, list[Item]] = {}
@@ -565,7 +575,7 @@ def collect_deadlines(cfg: dict | None = None, progress: Progress = _nop) -> lis
                 log.warning("%s 读取失败: %s", c.short, exc)
         drafts = deskbox.build_drafts({c.id: c for c in courses}, items_by_course, cfg=cfg)
         progress(f"共 {len(drafts.drafts)} 项未截止任务")
-        return drafts.drafts
+        return drafts
     finally:
         session.close()
 
