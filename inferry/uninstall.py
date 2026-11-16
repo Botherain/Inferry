@@ -12,7 +12,9 @@
 2. 使用数据 ``%LOCALAPPDATA%\\Inferry``（配置、登录态、日志、更新缓存…），
    以及 1.x 的旧目录 ``%LOCALAPPDATA%\\CanvasHelper``（存在才删，避免升级后残留）；
 3. 计划任务：新名两条 + 1.x 旧名两条（升级后立刻卸载也清得干净）；
-4. 桌面快捷方式 ``Inferry.lnk`` 与旧的 ``CanvasHelper.lnk``（存在才删）。
+4. 桌面快捷方式 ``Inferry.lnk`` 与旧的 ``CanvasHelper.lnk``（存在才删）；
+5. 开机自启动值 ``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Inferry``
+   （旧的 ``CanvasHelper`` 值一并清理）。
 
 **不删**：课程文件夹（``classes_root``）、DeskBox 里的待办、你放在程序目录里的任何
 其他文件（脚本调用方只删程序目录本身，父目录一旦还有别人的东西就整个保留）。
@@ -29,6 +31,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import autostart
 from .paths import DATA_DIR, LEGACY_DATA_DIR, PROJECT_DIR, get_logger, load_config
 
 log = get_logger()
@@ -55,6 +58,7 @@ class Plan:
     shortcuts: list[Path] = field(default_factory=list)
     classes_root: str = ""
     keep_data: bool = False
+    autostart: bool = False
     extra: list[str] = field(default_factory=list)
 
     @property
@@ -122,6 +126,7 @@ def plan(*, keep_data: bool = False, app_dir: Path | None = None) -> Plan:
         shortcuts=[p for p in links if p.is_file()],
         classes_root=classes,
         keep_data=keep_data,
+        autostart=autostart.enabled(),
     )
 
 
@@ -137,6 +142,8 @@ def render(plan_: Plan) -> str:
     else:
         lines.append("  · 使用数据   保留（按 --keep-data / KEEP 执行）")
     lines.append("  · 计划任务   " + "、".join(plan_.tasks))
+    if plan_.autostart:
+        lines.append("  · 开机自启动 Inferry（HKCU Run 注册表值）")
     lines.extend(f"  · 桌面快捷方式 {lnk.name}" for lnk in plan_.shortcuts)
     lines.append("")
     lines.append("将保留：")
@@ -270,6 +277,7 @@ def run(
         "app": str(plan_.app_dir) if plan_.app_dir else "",
         "data": [] if keep_data else [str(d) for d in plan_.data_dirs],
         "tasks": [],
+        "autostart": False,
         "shortcuts": [],
         "stopped": False,
         "self_deleted": "",
@@ -287,6 +295,11 @@ def run(
         report["tasks"] = remove_tasks()
     except Exception as exc:  # 计划任务删不掉不该挡住后面的清理
         report["errors"].append(f"计划任务：{exc}")
+    try:
+        autostart.disable()
+        report["autostart"] = plan_.autostart
+    except Exception as exc:
+        report["errors"].append(f"开机自启动：{exc}")
     for lnk in plan_.shortcuts:
         if remove_shortcut(lnk):
             report["shortcuts"].append(str(lnk))
@@ -337,6 +350,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  · 使用数据   已保留")
     if report["tasks"]:
         print("  · 计划任务   " + "、".join(report["tasks"]))
+    if report.get("autostart"):
+        print("  · 开机自启动 已删除")
     for lnk in report["shortcuts"]:
         print(f"  · 快捷方式   {lnk}")
     if report["self_deleted"]:

@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
-from . import APP_NAME, __version__, deskbox, runner, scheduler, shortcut, updater
+from . import APP_NAME, __version__, autostart, deskbox, runner, scheduler, shortcut, tray, updater
 from .canvas_api import Course
 from .classify import course_dirs, match_folder
 from .paths import (
@@ -48,7 +48,7 @@ _COLOR_ZH = {
 
 
 class App(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, start_hidden: bool = False) -> None:
         super().__init__()
         self.title(f"{APP_NAME} · Canvas 课程同步助手 v{__version__}")
         self.geometry("1200x820")
@@ -67,6 +67,13 @@ class App(tk.Tk):
         self.notices: list[dict] = []
         self._on_done = None
         self._on_error = None
+        # 托盘图标在独立线程里跑；Tk 控件只由主线程的队列泵操作
+        self._tray: tray.TrayIcon | None = None
+        self._tray_q: queue.Queue = queue.Queue()
+        self._tray_hint_shown = False
+        self._start_hidden = start_hidden
+        startup_cfg = self.cfg.get("startup") or {}
+        self._tray_enabled = bool(startup_cfg.get("tray", True))
         # 版本检查：先读缓存（零网络），启动后再后台补一次联网检查
         self.update_status: updater.UpdateStatus | None = updater.cached_status()
         self._update_checking = False
@@ -78,7 +85,16 @@ class App(tk.Tk):
         self._upgrade_notes_pending = False
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self._tray_enabled:
+            self._start_tray()
+        if start_hidden:
+            if self._tray is not None:
+                self.withdraw()
+            else:
+                self.log("系统托盘不可用，改为正常显示窗口")
         self.after(100, self._pump)
+        self.after(150, self._poll_tray)
         self.after(300, self._startup)
 
     # ---------- 基础设施 ----------
@@ -90,6 +106,10 @@ class App(tk.Tk):
         # 旧计划任务指向已不存在的 exe，旧桌面快捷方式是死链。都在后台小成本完成，
         # 失败只记日志，绝不影响启动。
         self._cleanup_renamed_leftovers()
+        # 开机自启：程序搬过目录后注册表里的旧命令会失效，启动时按当前位置重写
+        startup_cfg = self.cfg.get("startup") or {}
+        if startup_cfg.get("auto_start"):
+            autostart.ensure()
         # 院校清单在线更新：等启动的内容加载完再跑，避免抢同一个后台槽位
         self.after(12000, lambda: self._when_idle(self._refresh_school_list_async))
         # 版本校验：错开一点启动，让首屏先画出来；节流由 updater 自己控制
@@ -97,6 +117,8 @@ class App(tk.Tk):
         self.after(1500, self._check_update_async)
         # 首次运行：还没配过站点地址 -> 先让用户选学校，选完再进登录
         if not canvas_home():
+            if self._start_hidden:
+                self.show_window()
             self.after(400, self._first_run_pick)
             return
         auth = state.get("auth_needed") or {}
@@ -151,6 +173,8 @@ class App(tk.Tk):
             self.login_var.set("登录状态：未登录（点击「登录 / 刷新课程」）")
             self.log("没有保存的登录信息：点击「登录 / 刷新课程」登录；"
                      "登录成功后会自动读取课程、公告、成绩与截止时间")
+            if self._start_hidden:
+                self.show_window()
             return
         self.login_var.set("登录状态：检查中…")
         self.do_load_courses(auto=True)
@@ -216,6 +240,63 @@ class App(tk.Tk):
             self.after(300, lambda: self._when_idle(fn))
             return
         fn()
+
+    # ---------- 托盘 ----------
+
+    def _start_tray(self) -> bool:
+        if self._tray is not None:
+            return True
+        icon = tray.TrayIcon(
+            on_show=lambda: self._tray_q.put("show"),
+            on_quit=lambda: self._tray_q.put("quit"),
+        )
+        if icon.start():
+            self._tray = icon
+            self.log("托盘图标已启用：关闭窗口后程序继续在后台运行")
+            return True
+        self.log("系统托盘图标创建失败，关闭窗口将直接退出")
+        return False
+
+    def _stop_tray(self) -> None:
+        if self._tray is not None:
+            self._tray.stop()
+            self._tray = None
+
+    def _poll_tray(self) -> None:
+        while True:
+            try:
+                action = self._tray_q.get_nowait()
+            except queue.Empty:
+                break
+            if action == "show":
+                self.show_window()
+            elif action == "quit":
+                self.quit_app()
+        self.after(150, self._poll_tray)
+
+    def show_window(self) -> None:
+        self.deiconify()
+        with suppress(tk.TclError):
+            self.lift()
+            self.focus_force()
+
+    def _on_close(self) -> None:
+        close_to_tray = bool((self.cfg.get("startup") or {}).get("close_to_tray", True))
+        if self._tray is not None and close_to_tray:
+            self.withdraw()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.log("已收进系统托盘；双击托盘图标可重新打开，右键菜单可以退出")
+            return
+        self.quit_app()
+
+    def quit_app(self) -> None:
+        self._stop_tray()
+        self.destroy()
+
+    def destroy(self) -> None:
+        self._stop_tray()
+        super().destroy()
 
     def bg(self, fn, on_done=None, on_error=None) -> bool:
         """在后台线程运行 fn，避免阻塞界面。"""
@@ -510,6 +591,11 @@ class App(tk.Tk):
         self.var_sched = tk.BooleanVar(value=self.cfg["schedule"]["enabled"])
         self.var_synctime = tk.StringVar(value=self.cfg["schedule"]["sync_time"])
         self.var_report = tk.BooleanVar(value=self.cfg["schedule"]["report_enabled"])
+        startup_cfg = self.cfg.get("startup") or {}
+        self.var_autostart = tk.BooleanVar(value=bool(startup_cfg.get("auto_start")))
+        self.var_tray = tk.BooleanVar(value=bool(startup_cfg.get("tray", True)))
+        self.var_close_tray = tk.BooleanVar(
+            value=bool(startup_cfg.get("close_to_tray", True)))
 
         def row(label: str, var, y: int, browse: str = "") -> None:
             ttk.Label(tab, text=label).grid(row=y, column=0, sticky="w", pady=4)
@@ -590,10 +676,22 @@ class App(tk.Tk):
         ttk.Label(tab, text="（计划任务执行时使用已保存的浏览器登录态，无窗口）",
                   foreground="#666").grid(row=25, column=0, columnspan=3, sticky="w")
 
-        ttk.Label(tab, text="版本与更新", style="Header.TLabel").grid(
+        ttk.Label(tab, text="启动与托盘", style="Header.TLabel").grid(
             row=26, column=0, sticky="w", pady=(14, 4))
+        ttk.Checkbutton(
+            tab, text="开机时自动启动（登录后直接收进托盘）",
+            variable=self.var_autostart).grid(row=27, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(
+            tab, text="显示系统托盘图标，关闭窗口后继续在后台运行",
+            variable=self.var_tray).grid(row=28, column=0, columnspan=3, sticky="w")
+        ttk.Checkbutton(
+            tab, text="关闭窗口时最小化到托盘，而不是退出",
+            variable=self.var_close_tray).grid(row=29, column=0, columnspan=3, sticky="w")
+
+        ttk.Label(tab, text="版本与更新", style="Header.TLabel").grid(
+            row=30, column=0, sticky="w", pady=(14, 4))
         update_row = ttk.Frame(tab)
-        update_row.grid(row=27, column=0, columnspan=3, sticky="w", pady=2)
+        update_row.grid(row=31, column=0, columnspan=3, sticky="w", pady=2)
         self.update_summary_var = tk.StringVar(value="")
         ttk.Label(update_row, textvariable=self.update_summary_var,
                   foreground="#666").pack(side="left")
@@ -605,10 +703,10 @@ class App(tk.Tk):
         span = "每次启动都查" if interval <= 0 else f"每 {interval:g} 小时查一次"
         ttk.Checkbutton(
             tab, text=f"启动时自动检查更新（{span}，离线自动跳过）",
-            variable=self.var_update).grid(row=28, column=0, columnspan=3, sticky="w")
+            variable=self.var_update).grid(row=32, column=0, columnspan=3, sticky="w")
 
         btns = ttk.Frame(tab)
-        btns.grid(row=29, column=0, columnspan=3, sticky="w", pady=(18, 0))
+        btns.grid(row=33, column=0, columnspan=3, sticky="w", pady=(18, 0))
         ttk.Button(btns, text="保存设置", command=self.do_save_settings).pack(side="left")
         ttk.Button(btns, text="立即生成本周摘要", command=self.do_report).pack(side="left", padx=6)
         ttk.Button(btns, text="一键清理缓存", command=self.do_clean_cache).pack(side="left", padx=6)
@@ -623,12 +721,12 @@ class App(tk.Tk):
             tab,
             text=f"本程序免安装：配置、登录态与日志都在 {DATA_DIR}（删程序目录不会丢）",
             foreground="#666",
-        ).grid(row=30, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ).grid(row=34, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Label(
             tab,
             text=f"浏览器登录态保存在：{PROFILE_DIR}  ·  日志：{LOG_PATH}",
             foreground="#666",
-        ).grid(row=31, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ).grid(row=35, column=0, columnspan=3, sticky="w", pady=(2, 0))
         self._refresh_course_color_summary()
         self._refresh_update_summary()
         self._apply_update_banner()
@@ -1301,10 +1399,14 @@ class App(tk.Tk):
                 self.login_var.set("登录状态：⚠ 已过期（点击重新登录）")
                 self.log("保存的登录信息已过期，本次没有读取公告；"
                          "点击「登录 / 刷新课程」重新登录")
+                if self._start_hidden:
+                    self.show_window()
                 return
             if isinstance(payload, tuple) and len(payload) == 2 and payload[0] == "error":
                 self.login_var.set("登录状态：检查失败（点击重试）")
                 self.log(f"启动时检查登录态失败：{payload[1]}")
+                if self._start_hidden:
+                    self.show_window()
                 return
             courses, profile = payload
             self._apply_courses(courses, profile)
@@ -1836,8 +1938,17 @@ class App(tk.Tk):
         self.cfg["schedule"]["enabled"] = self.var_sched.get()
         self.cfg["schedule"]["sync_time"] = self.var_synctime.get().strip() or "08:30"
         self.cfg["schedule"]["report_enabled"] = self.var_report.get()
+        auto_start = bool(self.var_autostart.get())
+        tray_on = bool(self.var_tray.get()) or auto_start
+        close_to_tray = bool(self.var_close_tray.get()) and tray_on
+        self.cfg.setdefault("startup", {}).update(
+            auto_start=auto_start, tray=tray_on, close_to_tray=close_to_tray)
+        self.var_tray.set(tray_on)
+        self.var_close_tray.set(close_to_tray)
         save_config(self.cfg)
         self.log("设置已保存")
+
+        self._apply_startup_settings(auto_start)
 
         if self.var_sched.get():
             ok, msg = scheduler.enable(self.cfg["schedule"])
@@ -1854,10 +1965,29 @@ class App(tk.Tk):
             if ok:
                 self.log("计划任务已删除")
 
+    def _apply_startup_settings(self, auto_start: bool) -> None:
+        """保存设置后立即生效：注册表自启动与托盘图标的启停。"""
+        if auto_start:
+            if not autostart.enable():
+                messagebox.showwarning(APP_NAME, "开机自启动写入失败，详见 sync.log")
+                self.var_autostart.set(False)
+                self.cfg.setdefault("startup", {})["auto_start"] = False
+                save_config(self.cfg)
+        else:
+            autostart.disable()
 
-def main() -> None:
+        self._tray_enabled = bool((self.cfg.get("startup") or {}).get("tray", True))
+        if self._tray_enabled:
+            if not self._start_tray():
+                messagebox.showwarning(
+                    APP_NAME, "系统托盘图标创建失败，关闭窗口将直接退出")
+        else:
+            self._stop_tray()
+
+
+def main(start_hidden: bool = False) -> None:
     from .paths import ensure_dirs
 
     ensure_dirs()
-    app = App()
+    app = App(start_hidden=start_hidden)
     app.mainloop()

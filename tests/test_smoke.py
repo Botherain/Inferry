@@ -122,3 +122,7 @@ def test_19_改名迁移() -> None:
 
 def test_20_启动自动加载() -> None:
     _run("[20] 启动自动加载（有登录信息才读内容）", smoke.s20_startup)
+
+
+def test_21_开机自启动与托盘() -> None:
+    _run("[21] 开机自启动与系统托盘", smoke.s21_tray)

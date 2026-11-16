@@ -2324,6 +2324,53 @@ def s20_startup() -> None:
           api.calls == 0 and grades[1]["rows"][0].score == 8.0, str(api.calls))
 
 
+def s21_tray() -> None:
+    """[21] 开机自启动与托盘：命令生成、界面接线、卸载清理。"""
+    from inferry import autostart, tray
+    from inferry.paths import DEFAULT_CONFIG
+
+    print("\n[21] 开机自启动与系统托盘")
+    startup = DEFAULT_CONFIG.get("startup") or {}
+    check("默认开启托盘与关闭到托盘",
+          startup.get("tray") is True and startup.get("close_to_tray") is True
+          and startup.get("auto_start") is False, str(startup))
+
+    tmp = Path(tempfile.mkdtemp(prefix="ch_tray_"))
+    pyw = tmp / "Inferry.pyw"
+    pyw.write_text("", encoding="utf-8")
+    cmd = autostart.build_command(exe=Path(r"C:\Apps\Inferry\Inferry.exe"),
+                                  project_dir=tmp, frozen=True)
+    check("exe 版自启动命令带 --tray",
+          cmd == '"C:\\Apps\\Inferry\\Inferry.exe" --tray', cmd)
+    src_cmd = autostart.build_command(exe=Path(r"C:\Python\python.exe"),
+                                      project_dir=tmp, frozen=False)
+    check("源码版自启动命令指向 pyw 且带 --tray",
+          "Inferry.pyw" in src_cmd and src_cmd.endswith(" --tray"), src_cmd)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    gui_src = (ROOT / "inferry" / "gui.py").read_text(encoding="utf-8")
+    check("窗口关闭按钮走托盘逻辑",
+          'WM_DELETE_WINDOW' in gui_src and "def _on_close" in gui_src
+          and "self.withdraw()" in gui_src)
+    check("启动时可隐藏到托盘",
+          "start_hidden" in gui_src and "def _start_tray" in gui_src
+          and "TrayIcon(" in gui_src)
+    main_src = (ROOT / "inferry" / "__main__.py").read_text(encoding="utf-8")
+    check("命令行识别 --tray", '"--tray" in argv' in main_src
+          and "start_hidden=tray_start" in main_src)
+    pyw_src = (ROOT / "Inferry.pyw").read_text(encoding="utf-8")
+    check("pyw 入口透传 --tray", "start_hidden=start_hidden" in pyw_src)
+    check("托盘模块可导入且有菜单动作",
+          hasattr(tray, "TrayIcon") and "打开主界面" in (ROOT / "inferry" / "tray.py")
+          .read_text(encoding="utf-8"))
+
+    uninstall_src = (ROOT / "inferry" / "uninstall.py").read_text(encoding="utf-8")
+    ps1 = (ROOT / "uninstall.ps1").read_text(encoding="utf-8-sig")
+    check("卸载器删开机自启动值",
+          "autostart.disable" in uninstall_src and "Remove-ItemProperty" in ps1
+          and "'Inferry', $script:legacyName" in ps1)
+
+
 def main() -> int:
     cfg = load_config()
     root, fixture_root = build_course_root()
@@ -2356,6 +2403,7 @@ def main() -> int:
     s18_uninstall()
     s19_rename()
     s20_startup()
+    s21_tray()
 
     if fixture_root is not None:
         shutil.rmtree(fixture_root, ignore_errors=True)

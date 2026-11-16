@@ -206,6 +206,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 弹窗等待秒数，超时自动关闭并记为待重新登录
         "popup_timeout_s": 180,
     },
+    # 启动与托盘
+    "startup": {
+        # 登录 Windows 后自动启动（写入 HKCU Run，启动时直接收进托盘）
+        "auto_start": False,
+        # 显示系统托盘图标，关闭窗口后进程继续在后台运行
+        "tray": True,
+        # 点窗口右上角关闭时收进托盘；关掉则关闭即退出
+        "close_to_tray": True,
+    },
     # 版本校验与更新公告（数据源是 GitHub Releases，失败一律静默降级）
     "update": {
         # 启动 GUI / 后台同步时自动检查一次；关掉就只在设置页或命令行手动查

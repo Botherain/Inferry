@@ -11,9 +11,9 @@ from .paths import ensure_dirs, get_logger
 #: 自检要导入的子模块。打包时漏掉任何一个，exe 都会在用户点开对应功能时才炸
 #: （PyInstaller 是静态分析，函数内 import 漏了不会报错，只是运行期找不到）。
 _SUBMODULES = (
-    "auth", "canvas_api", "classify", "cleaner", "coursecode", "deskbox",
+    "auth", "autostart", "canvas_api", "classify", "cleaner", "coursecode", "deskbox",
     "extract", "extras", "filesync", "gui", "paths", "runner", "scheduler",
-    "schoollist", "schoolpicker", "schools", "shortcut", "tidy", "uninstall",
+    "schoollist", "schoolpicker", "schools", "shortcut", "tidy", "tray", "uninstall",
     "updater", "verify", "version",
 )
 
@@ -55,10 +55,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{APP_NAME} {__version__}")
         return 0
 
-    if not argv or argv[0] in ("gui", "-g", "--gui"):
+    tray_start = "--tray" in argv or "--minimized" in argv
+    if not argv or argv[0] in ("gui", "-g", "--gui") or argv[0] in ("--tray", "--minimized"):
         from . import gui
 
-        gui.main()
+        gui.main(start_hidden=tray_start)
         return 0
 
     cmd = argv[0]
@@ -294,8 +295,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("用法: python -m inferry "
           "[gui|sync|report|verify|flush|clean|tidy|login|courses|schools|update|uninstall|"
-          "install-browser] [--headless] [--version]")
-    print("  gui      启动图形界面（默认）")
+          "install-browser] [--headless] [--tray] [--version]")
+    print("  gui      启动图形界面（默认；加 --tray 直接收进托盘）")
     print("  sync     立即同步课程文件与待办")
     print("  report   生成本周学习摘要")
     print("  verify   只校验抓取完整度与编号（不下载；有问题退出码 4）")

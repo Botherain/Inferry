@@ -43,6 +43,11 @@
     "popup_on_expiry": true,
     "popup_timeout_s": 180
   },
+  "startup": {
+    "auto_start": false,
+    "tray": true,
+    "close_to_tray": true
+  },
   "schedule": {
     "enabled": false,
     "sync_time": "08:30",

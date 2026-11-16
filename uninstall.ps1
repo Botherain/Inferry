@@ -7,6 +7,8 @@ Inferry 一键卸载（Windows PowerShell）
     1.x 留下的 %LOCALAPPDATA%\CanvasHelper 也一并清掉，避免升级后残留）
   · 计划任务：Inferry-DailySync / -WeeklyReport 与 1.x 的 CanvasHelper-* 两条
   · 桌面快捷方式 Inferry.lnk 与 1.x 的 CanvasHelper.lnk（存在才删）
+  · 开机自启动：HKCU\Software\Microsoft\Windows\CurrentVersion\Run 下的
+    Inferry 值（旧的 CanvasHelper 值一并清掉）
 
 不删什么：
   · 课程文件夹（classes_root）
@@ -96,6 +98,12 @@ if (-not $KeepData) {
     Write-Host '  · 使用数据     保留'
 }
 Write-Host ("  · 计划任务     " + ($tasks -join '、'))
+$runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$autoNames = @('Inferry', $script:legacyName)
+$autoFound = @($autoNames | Where-Object {
+    Get-ItemProperty -Path $runKey -Name $_ -ErrorAction SilentlyContinue
+})
+if ($autoFound.Count -gt 0) { Write-Host ("  · 开机自启动   " + ($autoFound -join '、')) }
 foreach ($lnk in $shortcuts) {
     if (Test-Path -LiteralPath $lnk) { Write-Host "  · 桌面快捷方式 $lnk" }
 }
@@ -136,6 +144,19 @@ if ($AppDir -and (Test-Path -LiteralPath $AppDir)) {
 foreach ($task in $tasks) {
     & schtasks.exe /Delete /TN $task /F *> $null
     if ($LASTEXITCODE -eq 0) { Write-Host "  已删除计划任务 $task" }
+}
+
+# ---- 2b) 开机自启动（当前用户 Run 值） ----------------------------------
+foreach ($name in $autoNames) {
+    if (-not (Get-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue)) {
+        continue
+    }
+    Remove-ItemProperty -Path $runKey -Name $name -Force -ErrorAction SilentlyContinue
+    if (-not (Get-ItemProperty -Path $runKey -Name $name -ErrorAction SilentlyContinue)) {
+        Write-Host "  已删除开机自启动 $name"
+    } else {
+        Write-Warn "  ! 开机自启动没能删除：$name"
+    }
 }
 
 # ---- 3) 桌面快捷方式 ----------------------------------------------------

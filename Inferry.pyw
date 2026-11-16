@@ -45,7 +45,8 @@ def main() -> int:
             "双击里面的 Inferry.exe，不需要 Python。）"
         )
         return 1
-    gui_main()
+    start_hidden = "--tray" in sys.argv[1:] or "--minimized" in sys.argv[1:]
+    gui_main(start_hidden=start_hidden)
     return 0
 
 

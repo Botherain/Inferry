@@ -5,6 +5,20 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.2.0] - 2026-11-16
+
+### 新增 · 开机自启动与系统托盘
+
+- 设置页新增「开机时自动启动」「显示系统托盘图标」「关闭窗口时最小化到托盘」。
+- 开机自启动写入当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  值 `Inferry`，启动命令带 `--tray`，登录后直接收进托盘，不弹主窗口。程序换目录后
+  启动会按当前位置重写该值。
+- 托盘图标用 ctypes 调 Windows shell32 实现，不增加第三方依赖。左键或双击打开
+  主界面，右键菜单提供「打开主界面」与「退出」。
+- 默认点关闭按钮收进托盘，同步、计划任务和后台加载继续运行；托盘创建失败时
+  回退为正常窗口，关闭即退出。
+- 卸载器与 `uninstall.ps1` 会删除 `Inferry` 自启动值，并清理旧的 `CanvasHelper` 值。
+
 ## [2.1.1] - 2026-11-10
 
 ### 修复 · 截止时间修改同步
@@ -712,7 +726,7 @@ Edge 缺失时的浏览器兜底，并把「打包 + 发布」整条链路自动
   脚本入口与 pytest 双跑，Windows runner。
 - 计划任务在真实环境跑通验证，`schedule.enabled` 默认仍为 `False`（不替用户做决定）。
 
-[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.2.0...HEAD
 [1.2.1]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.1.0
