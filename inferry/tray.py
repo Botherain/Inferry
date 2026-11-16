@@ -205,6 +205,7 @@ class TrayIcon:
     def start(self, timeout: float = 5.0) -> bool:
         if self._thread is not None and self._thread.is_alive():
             return self._ok
+        self._remove_icon()
         self._ready.clear()
         self._ok = False
         self._thread = threading.Thread(target=self._run, name="inferry-tray", daemon=True)
@@ -215,6 +216,7 @@ class TrayIcon:
         return True
 
     def stop(self, timeout: float = 2.0) -> None:
+        self._remove_icon()
         hwnd = self._hwnd
         if hwnd:
             user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
@@ -223,6 +225,11 @@ class TrayIcon:
             thread.join(timeout)
         self._thread = None
         self._ok = False
+
+    def _remove_icon(self) -> None:
+        if self._added:
+            shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
+            self._added = False
 
     # ---------- 线程内 ----------
 
@@ -281,9 +288,7 @@ class TrayIcon:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
         finally:
-            if self._added:
-                shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self._nid))
-                self._added = False
+            self._remove_icon()
             if self._icon:
                 user32.DestroyIcon(self._icon)
                 self._icon = 0
@@ -299,6 +304,9 @@ class TrayIcon:
                 self._show_menu(hwnd)
             return 0
         if msg == WM_CLOSE:
+            # 先删托盘图标再销毁窗口：窗口先没会让 Explorer 留下一个
+            # 要等鼠标经过才消失的幽灵图标
+            self._remove_icon()
             user32.DestroyWindow(hwnd)
             return 0
         if msg == WM_DESTROY:

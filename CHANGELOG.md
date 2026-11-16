@@ -5,6 +5,16 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.2.1] - 2026-11-16
+
+### 修复 · 托盘图标重复
+
+- 新增单实例保护：GUI 进程持有命名互斥量，再次双击快捷方式或重复开机启动时，
+  第二个进程只向已有实例发送「显示窗口」事件后退出，不再新建第二个托盘图标。
+- 托盘退出时先 `Shell_NotifyIcon(NIM_DELETE)` 删除图标，再销毁隐藏窗口，避免
+  Explorer 留下要等鼠标经过才消失的幽灵图标。
+- 同一实例重复启动托盘会先清理旧图标，不会重复调用 `NIM_ADD`。
+
 ## [2.2.0] - 2026-11-16
 
 ### 新增 · 开机自启动与系统托盘
@@ -726,7 +736,7 @@ Edge 缺失时的浏览器兜底，并把「打包 + 发布」整条链路自动
   脚本入口与 pytest 双跑，Windows runner。
 - 计划任务在真实环境跑通验证，`schedule.enabled` 默认仍为 `False`（不替用户做决定）。
 
-[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/Botherain/Inferry/compare/v2.2.1...HEAD
 [1.2.1]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.1
 [1.2.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.2.0
 [1.1.0]: https://github.com/Botherain/CanvasHelper/releases/tag/v1.1.0

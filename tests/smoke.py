@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # Windows 控制台可能是 cp1252/GBK，中文 print 会直接 UnicodeEncodeError。
@@ -2326,7 +2327,7 @@ def s20_startup() -> None:
 
 def s21_tray() -> None:
     """[21] 开机自启动与托盘：命令生成、界面接线、卸载清理。"""
-    from inferry import autostart, tray
+    from inferry import autostart, instance, tray
     from inferry.paths import DEFAULT_CONFIG
 
     print("\n[21] 开机自启动与系统托盘")
@@ -2348,6 +2349,27 @@ def s21_tray() -> None:
           "Inferry.pyw" in src_cmd and src_cmd.endswith(" --tray"), src_cmd)
     shutil.rmtree(tmp, ignore_errors=True)
 
+    old_mutex, old_event = instance.MUTEX_NAME, instance.EVENT_NAME
+    suffix = f".{os.getpid()}"
+    instance.MUTEX_NAME = "Local\\Inferry.Test" + suffix
+    instance.EVENT_NAME = "Local\\Inferry.Test.Show" + suffix
+    try:
+        check("单实例：第一次获取互斥量", instance.acquire())
+        check("单实例：第二次被识别为已有实例", not instance.acquire())
+        events: list[str] = []
+        instance.watch_show(lambda: events.append("show"))
+        time.sleep(0.1)
+        check("单实例：唤起信号发送成功", instance.signal_show(retries=3))
+        deadline = time.time() + 1.0
+        while time.time() < deadline and not events:
+            time.sleep(0.02)
+        check("单实例：监听线程恢复窗口", events == ["show"], str(events))
+    finally:
+        instance.stop_watch()
+        instance.release()
+        instance.MUTEX_NAME = old_mutex
+        instance.EVENT_NAME = old_event
+
     gui_src = (ROOT / "inferry" / "gui.py").read_text(encoding="utf-8")
     check("窗口关闭按钮走托盘逻辑",
           'WM_DELETE_WINDOW' in gui_src and "def _on_close" in gui_src
@@ -2363,6 +2385,12 @@ def s21_tray() -> None:
     check("托盘模块可导入且有菜单动作",
           hasattr(tray, "TrayIcon") and "打开主界面" in (ROOT / "inferry" / "tray.py")
           .read_text(encoding="utf-8"))
+    tray_src = (ROOT / "inferry" / "tray.py").read_text(encoding="utf-8")
+    check("关闭托盘前先删图标（避免幽灵图标）",
+          "def _remove_icon" in tray_src and "self._remove_icon()" in tray_src)
+    check("GUI 用命名互斥量保证单实例",
+          "instance.acquire()" in gui_src and "instance.watch_show" in gui_src
+          and "signal_show" in gui_src)
 
     uninstall_src = (ROOT / "inferry" / "uninstall.py").read_text(encoding="utf-8")
     ps1 = (ROOT / "uninstall.ps1").read_text(encoding="utf-8-sig")

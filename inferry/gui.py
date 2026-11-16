@@ -280,6 +280,10 @@ class App(tk.Tk):
             self.lift()
             self.focus_force()
 
+    def request_show(self) -> None:
+        """供单实例监听线程调用：只入队，真正恢复窗口由主线程执行。"""
+        self._tray_q.put("show")
+
     def _on_close(self) -> None:
         close_to_tray = bool((self.cfg.get("startup") or {}).get("close_to_tray", True))
         if self._tray is not None and close_to_tray:
@@ -1986,8 +1990,20 @@ class App(tk.Tk):
 
 
 def main(start_hidden: bool = False) -> None:
+    from . import instance
     from .paths import ensure_dirs
 
     ensure_dirs()
-    app = App(start_hidden=start_hidden)
-    app.mainloop()
+    if not instance.acquire():
+        if instance.signal_show():
+            log.info("已有 Inferry 实例在运行，已请求它显示窗口")
+        else:
+            log.info("已有 Inferry 实例在运行，但没能唤起窗口")
+        return
+    try:
+        app = App(start_hidden=start_hidden)
+        instance.watch_show(app.request_show)
+        app.mainloop()
+    finally:
+        instance.stop_watch()
+        instance.release()

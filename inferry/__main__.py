@@ -12,7 +12,7 @@ from .paths import ensure_dirs, get_logger
 #: （PyInstaller 是静态分析，函数内 import 漏了不会报错，只是运行期找不到）。
 _SUBMODULES = (
     "auth", "autostart", "canvas_api", "classify", "cleaner", "coursecode", "deskbox",
-    "extract", "extras", "filesync", "gui", "paths", "runner", "scheduler",
+    "extract", "extras", "filesync", "gui", "instance", "paths", "runner", "scheduler",
     "schoollist", "schoolpicker", "schools", "shortcut", "tidy", "tray", "uninstall",
     "updater", "verify", "version",
 )
