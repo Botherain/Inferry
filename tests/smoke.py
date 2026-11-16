@@ -2256,8 +2256,10 @@ def s19_rename() -> None:
     check("卸载脚本默认数据目录含新旧两处",
           "'Inferry', $script:legacyName" in ps1)
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    check("README 写明从 1.3.4 升级与回滚",
-          "1.3.4" in readme and "CanvasHelper" in readme and "回滚" in readme)
+    check("README 写明从更名前的版本升级与回滚",
+          "CanvasHelper" in readme and "回滚" in readme and "更名前" in readme)
+    check("README 不写死产品版本号",
+          re.search(r"Inferry[- ]v\d+\.\d+\.\d+", readme) is None)
 
 
 def s20_startup() -> None:

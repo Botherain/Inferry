@@ -1,6 +1,6 @@
 # Inferry
 
-> **v2.0.0**：原 **CanvasHelper** 更名为 **Inferry**。功能与 1.3.4 基本一致，变化集中在产品名、数据目录和发布资产名。
+> Inferry 原名 CanvasHelper。
 
 Inferry 是一个面向 Windows 的 **Canvas 课程同步与学习辅助工具**。它用你自己的浏览器登录态读取学校的 Canvas，把课程文件按你已有的目录习惯归档到本地，并把作业截止时间写进 [DeskBox](https://github.com/Tianyu199509/DeskBox) 的待办小组件。
 
@@ -54,8 +54,8 @@ Inferry 是一个面向 Windows 的 **Canvas 课程同步与学习辅助工具**
 - **镜像 Canvas 文件夹层级**：真实存在的 Canvas 文件夹会映射成子目录；讲义按「章/周」编号归入 `Lecture3` / `Week2` 这类子目录，并**跟随本地既有命名样式**（本地有 `Lecture1` 就统一成 `Lecture{n}`）；识别不到章节号的散件（`data.zip`）保持平铺。
 - **每套 tutorial 一个文件夹**：习题资料按 tutorial 编号收进 `2.Tutorial session/Tutorial4/`（本地已有 `Week3` 这种命名就沿用 `Week4/`），讲义、数据包、讨论帖快照都放在同一套目录里，教程根下的 `data/` 子目录也会保留。Canvas 侧的 `2026/tutorials/T4`、旧年份目录只是来源；已有文件会**复制**进分组目录（不联网、原文件保留），新下载则直接落到分组目录。
 - **只增不删、不重复下载**：已存在的文件按「归一化文件名 + 大小」判断（`0.Introduction.pptx` 与 `Introduction.pptx`、`x.pptx` 与 `x (1).pptx` 视为同一份），同名不同内容自动加 `(1)`；同步记录写入 `state.json`，下次只补新增与变更。
-- **同名副本不会让内容漏掉**：同名同大小的文件如果已在课程目录的其他位置（比如自己整理的工作副本），会复制一份到当前保存位置——教程文件进 `TutorialN/`，其他按画布结构——不联网、不覆盖原件，编号与层级保持完整。
-- **抓取自检**：每次预览/同步都会顺带检查覆盖度与命名——画布上有但没进计划的条目、落到目标位置之外的「已存在」、模块名/文件夹/文件名三处编号互相打架、画布有编号 N 但计划里缺号，都会以 `【抓取校验】` 一节列出；命令行 `inferry verify` 可单独跑（不下载），有问题返回退出码 `4`。
+- **同名副本不会让内容漏掉**：同名同大小的文件如果已在课程目录的其他位置（比如自己整理的工作副本），会复制一份到当前保存位置：教程文件进 `TutorialN/`，其他按画布结构；不联网，不覆盖原件，编号与层级保持完整。
+- **抓取自检**：每次预览和同步都会顺带检查覆盖度与命名：画布上有但没进计划的条目、落到目标位置之外的「已存在」、模块名/文件夹/文件名三处编号互相打架、画布有编号 N 但计划里缺号，都会以 `【抓取校验】` 一节列出；命令行 `inferry verify` 可单独跑（不下载），有问题返回退出码 `4`。
 - **压缩包智能处理**：含讲义/代码（`.ipynb` `.py` `.pdf` `.pptx` 等）判为**内容包**自动解压；包名命中 `data` / `train` / `mnist` 等词，或包内只有数据文件则判为**数据包**原样保留。解压拒绝 `zip-slip`、跳过 `__MACOSX` / `._*` / `.DS_Store`、单包上限 2 GiB、同名同大小幂等跳过。`.rar` / `.7z` 需要外部工具，不作处理。
 
 ### 4. 待办：写进 DeskBox
@@ -99,8 +99,8 @@ Inferry 是一个面向 Windows 的 **Canvas 课程同步与学习辅助工具**
 
 ### 方式一：下载即用（推荐）
 
-1. 到 Releases 页下载最新的 `Inferry-v2.0.0-win64.zip`。
-2. **解压到可写目录**（例如 `D:\Apps\`）。不要放在 `C:\Program Files`，也不要直接在压缩包里双击运行——程序以后要「一键更新」，需要能覆盖自己所在的目录。
+1. 到 Releases 页下载最新的 Windows 压缩包（文件名以 `-win64.zip` 结尾）。
+2. **解压到可写目录**（例如 `D:\Apps\`）。不要放在 `C:\Program Files`，也不要直接在压缩包里双击运行。程序以后要「一键更新」，需要能覆盖自己所在的目录。
 3. 如果 zip 的「属性」里有「解除锁定」，先勾选并应用，**再**解压；否则 Windows 可能拦住压缩包内自带的 `node.exe`。
 4. 双击 `Inferry\Inferry.exe` 启动。首次运行若出现「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」。
 5. 首次配置流程：
@@ -165,14 +165,13 @@ python -m inferry                   # 不带参数 = 启动图形界面
 | `%LOCALAPPDATA%\Inferry\updates\` | 更新包临时目录，可随时清理 |
 | `<课程根目录>` | 课程文件（默认 `%USERPROFILE%\CanvasCourses`，由你指定） |
 
-### 从 1.3.4 升级到 2.0.0
+### 从更名前的版本升级
 
-- **先确认自己在 1.3.4**：1.3.2 及更早版本的更新器不认识新程序名，需要手动下载 zip 覆盖一次。
-- **数据目录迁移**：`%LOCALAPPDATA%\CanvasHelper` 会在首次启动时一次性迁移到 `%LOCALAPPDATA%\Inferry`，登录态与课程配色跟着走；两个目录都存在时以新目录为准，不会覆盖。
-- **计划任务**：旧的 `CanvasHelper-*` 任务会自动清理，并按新程序路径重建。
-- **桌面快捷方式**：旧的 `CanvasHelper.lnk` 会失效，请到 设置 → 创建桌面快捷方式 重建。
-- **命令行**：`canvas-helper` 更名为 `inferry`，脚本与文档里的命令请一并替换。
-- **回滚**：如需退回 1.3.4，把 `%LOCALAPPDATA%\Inferry` 改名或复制回 `%LOCALAPPDATA%\CanvasHelper`，再安装 1.3.4。
+- 首次启动会把 `%LOCALAPPDATA%\CanvasHelper` 迁移到 `%LOCALAPPDATA%\Inferry`，登录态与课程配色一起搬过去；两个目录都在时以新目录为准，旧目录保留。
+- 旧的 `CanvasHelper-*` 计划任务会删除，并按新程序路径重建。
+- 旧的 `CanvasHelper.lnk` 会失效，到 设置 → 创建桌面快捷方式 重建。
+- 命令行从 `canvas-helper` 改为 `inferry`。
+- 各版本的差异与回滚方法见 `CHANGELOG.md` 和对应的 Release 说明。
 
 ### 参与开发
 
@@ -186,7 +185,7 @@ python tests/smoke.py                             # 离线全量自检（不联�
 
 打包（Windows 单目录 exe）：安装 PyInstaller 后执行 `pyinstaller --noconfirm --clean Inferry.spec`，产物在 `dist\Inferry\`，整目录压缩成 zip 分发。测试与 CI 默认全部离线运行，不需要真实 Canvas 账号。
 
-版本号只在 `inferry/version.py` 改一处；升位规则、预发布通道与发布步骤见 [`docs/VERSIONING.md`](docs/VERSIONING.md)，发版前用 `python scripts/check_version.py --tag vX.Y.Z` 自检一致性。
+版本号只在 `inferry/version.py` 改一处；升位规则、预发布通道与发布步骤见 [`docs/VERSIONING.md`](docs/VERSIONING.md)，发版前用 `python scripts/check_version.py --tag <发布 tag>` 自检一致性。
 
 ---
 
@@ -222,7 +221,7 @@ Canvas 对学生账号的权限限制很常见：课程级文件索引、逐文�
 
 **Q：同步完了，DeskBox 里没有新待办？**
 
-依次排查：① 设置页的 `DeskBox todo.json` / `DeskBox 程序路径` 是否已正确识别（未安装或装在非标准位置时需要手选）；② 后台同步采用「排队」策略时，待办会先进入 `pending_todos.json`，下次打开 Inferry 才写入，也可用 `inferry flush` 立即补写；③ 该作业是否已过期或已完成——两者都不会再写入；④ 日志里是否有 todo.json 解析失败或写入被占用。
+依次排查：① 设置页的 `DeskBox todo.json` / `DeskBox 程序路径` 是否已正确识别（未安装或装在非标准位置时需要手选）；② 后台同步采用「排队」策略时，待办会先进入 `pending_todos.json`，下次打开 Inferry 才写入，也可用 `inferry flush` 立即补写；③ 该作业是否已过期或已完成，两者都不会再写入；④ 日志里是否有 todo.json 解析失败或写入被占用。
 
 **Q：为什么写入待办时 DeskBox 会闪一下、短暂消失？**
 
@@ -246,7 +245,7 @@ DeskBox 运行时不会重新读取被替换的 `todo.json`，所以采用「写
 
 **Q：程序会把我的数据上传到哪里吗？**
 
-不会上传到作者服务器。网络请求只发生在本校 Canvas 站点、GitHub（检查更新、拉取院校目录）以及你主动下载的外部链接（如讨论区里的 GitHub / Drive 文件）。登录凭据只保存在本机 `session.json` 与浏览器 profile 中——**不要**把数据目录或日志原样发给别人，里面可能含 Cookie、课程名与文件路径。
+不会上传到作者服务器。网络请求只发生在本校 Canvas 站点、GitHub（检查更新、拉取院校目录）以及你主动下载的外部链接（如讨论区里的 GitHub / Drive 文件）。登录凭据只保存在本机 `session.json` 与浏览器 profile 中。**不要**把数据目录或日志原样发给别人，里面可能含 Cookie、课程名与文件路径。
 
 **Q：一键清理会不会删掉登录态？**
 
@@ -254,7 +253,7 @@ DeskBox 运行时不会重新读取被替换的 `todo.json`，所以采用「写
 
 **Q：怎么彻底卸载？会不会删我的课程文件和待办？**
 
-绿色版双击 zip 根目录的 `uninstall.bat`；源码版执行 `inferry uninstall`。默认删除程序目录、`%LOCALAPPDATA%\Inferry`、两个计划任务与桌面快捷方式；加 `--keep-data` 可保留配置与登录态。**课程文件夹和 DeskBox 待办永远不会被删除**——需要的话请自行清理。
+绿色版双击 zip 根目录的 `uninstall.bat`；源码版执行 `inferry uninstall`。默认删除程序目录、`%LOCALAPPDATA%\Inferry`、两个计划任务与桌面快捷方式；加 `--keep-data` 可保留配置与登录态。**课程文件夹和 DeskBox 待办永远不会被删除**；需要的话请自行清理。
 
 **Q：支持 macOS / Linux 吗？**
 
